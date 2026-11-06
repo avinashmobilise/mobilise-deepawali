@@ -424,3 +424,19 @@
     grid-area: remove;
   }
 }
+
+/* Live results: voting controls (team-required switch + reset all) */
+.voting-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px 20px;
+  margin-bottom: 16px;
+}
+.voting-controls h2 {
+  margin: 0 0 2px;
+}
+.voting-controls .muted {
+  margin: 0 0 10px;
+}

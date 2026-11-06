@@ -543,6 +543,9 @@
     if (voted) {
       status = `<span class="badge ok">${ICONS.check} Voted</span>`;
       action = `<a class="btn btn-ghost sm" href="#/mine/${esc(c.id)}">${ICONS.eye} View my scores</a>`;
+    } else if (S.state.settings.teamRequired && !S.me.voter.teamId) {
+      status = `<span class="badge lock">${ICONS.lock} Join a team first</span>`;
+      action = `<p class="cc-note">You're not in a team yet. Ask your team leader to add you, then you can vote.</p>`;
     } else if (c.status !== 'open') {
       status = `<span class="badge lock">${ICONS.lock} Closed</span>`;
       action = `<p class="cc-note">Voting is closed for now.</p>`;
@@ -1242,6 +1245,10 @@
     const c = comp(id);
     if (!c) return go('#/hub');
     if (S.me.ballots[c.id]) return go('#/mine/' + c.id);
+    if (S.state.settings.teamRequired && !S.me.voter.teamId) {
+      toast("You're not in a team yet. Ask your team leader to add you, then vote.");
+      return go('#/hub');
+    }
     if (c.status !== 'open') {
       toast('Voting for this competition is closed.');
       return go('#/hub');
@@ -1473,7 +1480,7 @@
           s.close();
           return logout('Your login has expired. Please log in again with your office email.');
         }
-        if (ex.code === 'ALREADY_VOTED' || ex.code === 'CLOSED') {
+        if (ex.code === 'ALREADY_VOTED' || ex.code === 'CLOSED' || ex.code === 'NO_TEAM') {
           s.close();
           await Promise.all([refreshMe(), refreshState()]);
           toast(ex.message);

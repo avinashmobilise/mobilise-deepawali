@@ -370,6 +370,14 @@
   function liveTab() {
     const d = A.data;
     return `
+<div class="panel voting-controls">
+  <div class="vc-text">
+    <h2>Voting controls</h2>
+    <p class="muted sm">${d.ballotCount} ballot${d.ballotCount === 1 ? '' : 's'} cast so far. Reset all votes to start the voting fresh, for example after a test round.</p>
+    <label class="switch"><input type="checkbox" data-act="team-required" ${d.settings.teamRequired !== false ? 'checked' : ''}><span class="sw" aria-hidden="true"></span>Only people who are in a team can vote</label>
+  </div>
+  <button class="btn btn-danger" type="button" data-act="reset-all" ${d.ballotCount ? '' : 'disabled'}>Reset all votes</button>
+</div>
 <div class="live-grid">${d.competitions.map(compPanel).join('')}</div>
 ${votersPanel()}
 <div class="panel export-panel">
@@ -1225,6 +1233,17 @@ ${votersPanel()}
   });
 
   root.addEventListener('change', async (e) => {
+    const req = e.target.closest('[data-act="team-required"]');
+    if (req) {
+      try {
+        A.data = await api('/api/admin/settings', { method: 'POST', body: { teamRequired: req.checked } });
+        toast(req.checked ? 'Only people in a team can vote now' : 'Everyone in the employee master can vote now');
+      } catch (ex) {
+        req.checked = !req.checked;
+        toast(ex.message, true);
+      }
+      return;
+    }
     const lead = e.target.closest('[data-act="leaders-edit"]');
     if (lead) {
       try {

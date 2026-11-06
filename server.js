@@ -169,6 +169,7 @@ function defaultDb() {
       smtp: defaultSmtp(),
       mailApi: normaliseMailApi(null),
       leadersCanEdit: true, // team leaders may add/edit their own members
+      teamRequired: true, // only people who are in a team may vote
     },
     teams: Array.from({ length: 10 }, (_, i) => ({ id: 't' + (i + 1), name: 'Team ' + (i + 1), leaderName: '', leaderEmail: '' })),
     employees: [],
@@ -206,6 +207,7 @@ function migrate(d) {
     smtp: normaliseSmtp(Object.assign(defaultSmtp(), old.smtp && typeof old.smtp === 'object' ? old.smtp : {})),
     mailApi: normaliseMailApi(old.mailApi),
     leadersCanEdit: old.leadersCanEdit == null ? true : !!old.leadersCanEdit,
+    teamRequired: old.teamRequired == null ? true : !!old.teamRequired,
   }; // v1 settings.requirePin is dropped here
 
   const seenTeams = new Set();
@@ -666,6 +668,7 @@ function publicState() {
     settings: {
       eventTitle: s.eventTitle,
       owner: { name: s.owner.name, title: s.owner.title, message: s.owner.message, photo: s.owner.photo },
+      teamRequired: !!s.teamRequired,
     },
     teams: db.teams.map((t) => ({ id: t.id, name: t.name })),
     competitions: db.competitions.map((c) => ({
@@ -757,6 +760,7 @@ function adminData() {
       },
       mailApi: { url: s.mailApi.url, keySet: !!s.mailApi.key },
       leadersCanEdit: !!s.leadersCanEdit,
+      teamRequired: !!s.teamRequired,
     },
     teams: db.teams.map((t) => ({
       id: t.id,
@@ -1083,6 +1087,8 @@ async function handleApi(req, res, url) {
     const comp = db.competitions.find((c) => c.id === body.competitionId);
     if (!comp) return send(res, 404, { error: 'Competition not found.', code: 'NOT_FOUND' });
     if (comp.status !== 'open') return send(res, 403, { error: 'Voting for this competition is closed.', code: 'CLOSED' });
+    if (db.settings.teamRequired && !voter.teamId)
+      return send(res, 403, { code: 'NO_TEAM', error: "You're not in a team yet. Ask your team leader to add you, then vote." });
     if (db.ballots.some((b) => b.voterId === voter.id && b.competitionId === comp.id))
       return send(res, 409, { error: 'You have already voted in this competition.', code: 'ALREADY_VOTED' });
     const entries = entriesForVoter(comp, voter);
@@ -1186,6 +1192,7 @@ async function handleApi(req, res, url) {
         if (b.owner.message != null) s.owner.message = cleanMultiline(b.owner.message, 600);
       }
       if (b.leadersCanEdit != null) s.leadersCanEdit = !!b.leadersCanEdit;
+      if (b.teamRequired != null) s.teamRequired = !!b.teamRequired;
       await mustSave();
       return send(res, 200, adminData());
     }
