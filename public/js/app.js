@@ -1,4 +1,6 @@
-/* app.js — the voting app (mobile first, works on desktop too). */
+/* app.js — the voting app (mobile first, works on desktop too).
+ * Every employee logs in with their office email + a 6-digit code (OTP) and votes individually.
+ */
 (function () {
   'use strict';
   const { FX, Sound, Art, ICONS, LS, esc, Intro, reduceMotion } = window.DW;
@@ -8,15 +10,21 @@
 
   const LABELS = ['', 'Hmm', 'Okay', 'Fair', 'Decent', 'Good', 'Nice', 'Great', 'Lovely', 'Superb', 'Dazzling!'];
   const NOUN = { teams: ['team', 'teams'], male: ['participant', 'participants'], female: ['participant', 'participants'] };
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+  const OTP_TTL_MS = 10 * 60 * 1000;
+  const svg = (body) =>
+    `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+  const IC_LOGOUT = svg('<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/>');
+  const IC_MAIL = svg('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/>');
 
-  const S = { state: null, me: null, view: '', cleanup: [] };
+  const S = { state: null, me: null, view: '', cleanup: [], polls: 0 };
 
   /* ---------------- storage ---------------- */
   const token = {
     get: () => LS.get('dw_token'),
     set: (v) => (v ? LS.set('dw_token', v) : LS.del('dw_token')),
   };
-  const draftKey = (cid) => `dw_draft_${S.me.team.id}_${cid}`;
+  const draftKey = (cid) => `dw_draft_${S.me.voter.id}_${cid}`;
   function getDraft(cid) {
     try {
       const d = JSON.parse(LS.get(draftKey(cid)) || '{}');
@@ -27,6 +35,19 @@
   }
   const setDraft = (cid, d) => LS.set(draftKey(cid), JSON.stringify(d));
   const clearDraft = (cid) => LS.del(draftKey(cid));
+
+  /** A code that was emailed recently (survives the phone switching to the mail app and back). */
+  function getPending() {
+    try {
+      const p = JSON.parse(LS.get('dw_otp_pending') || 'null');
+      if (p && p.email && Date.now() - p.sentAt < OTP_TTL_MS) return p;
+    } catch (e) {
+      /* ignore */
+    }
+    LS.del('dw_otp_pending');
+    return null;
+  }
+  const setPending = (p) => (p ? LS.set('dw_otp_pending', JSON.stringify(p)) : LS.del('dw_otp_pending'));
 
   /* ---------------- api ---------------- */
   async function api(path, opts = {}) {
@@ -69,7 +90,12 @@
   async function refreshMe() {
     if (!token.get()) return;
     try {
-      S.me = await api('/api/me');
+      const d = await api('/api/me');
+      if (d && d.voter) S.me = { voter: d.voter, ballots: d.ballots || {} };
+      else {
+        token.set(null);
+        S.me = null;
+      }
     } catch (e) {
       if (e.status === 401) {
         token.set(null);
@@ -80,17 +106,29 @@
 
   /* ---------------- helpers ---------------- */
   const comp = (id) => S.state.competitions.find((c) => c.id === id);
-  const entriesForMe = (c) => (c.kind === 'teams' && S.me ? c.entries.filter((e) => e.id !== S.me.team.id) : c.entries);
+  /** Must match the server: nobody scores themself; when the organiser switched on
+   *  "noOwnTeam" for a competition, nobody scores their own team (desk) / team-mates (dress). */
+  function entriesForMe(c) {
+    if (!S.me) return c.entries;
+    const v = S.me.voter;
+    const ownTeam = c.noOwnTeam && v.teamId ? v.teamId : null;
+    if (c.kind === 'teams') return ownTeam ? c.entries.filter((e) => e.id !== ownTeam) : c.entries;
+    return c.entries.filter((e) => e.id !== v.id && !(ownTeam && e.teamId === ownTeam));
+  }
   const noun = (c, n) => NOUN[c.kind][n === 1 ? 0 : 1];
-  const myTeamName = () => {
-    if (!S.me) return '';
-    const t = S.state.teams.find((x) => x.id === S.me.team.id);
-    return (t || S.me.team).name;
-  };
+  const myName = () => (S.me ? S.me.voter.name || S.me.voter.email || '' : '');
+  const firstName = () => myName().trim().split(/\s+/)[0] || '';
+  function myTeamName() {
+    if (!S.me || !S.me.voter.teamId) return '';
+    const t = S.state.teams.find((x) => x.id === S.me.voter.teamId);
+    return t ? t.name : S.me.voter.teamName || '';
+  }
+  const emailReady = () => !!(S.state.emailLogin && S.state.emailLogin.ready);
   const soundBtn = () => `<button class="icon-btn" type="button" data-sound-toggle></button>`;
   const brand = (cls = '') => `<img class="brand-mark ${cls}" src="assets/mobilise-logo-white.svg" alt="Mobilise" width="132" height="28">`;
   const scoreLabel = (v) => `<b>${v}</b><small>${LABELS[v]}</small>`;
   const fmtAvg = (n) => String(Math.round(n * 100) / 100);
+  const fmtWait = (sec) => (sec > 90 ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : `${sec}s`);
   function fmtTime(iso) {
     try {
       return new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -107,6 +145,13 @@
     } catch (e) {
       /* unsupported */
     }
+  }
+  function shake(el) {
+    if (!el) return;
+    el.classList.remove('shake');
+    void el.offsetWidth;
+    el.classList.add('shake');
+    vibrate([30, 40, 30]);
   }
 
   let toastTimer;
@@ -188,17 +233,17 @@
     });
   }
 
-  function logout(msg) {
+  function logout(msg, to = '#/login') {
     token.set(null);
     S.me = null;
     if (msg) toast(msg);
-    go('#/team');
+    go(to);
   }
 
   /* ---------------- router ---------------- */
   const ROUTES = [
     [/^#?\/?$/, 'landing', viewLanding],
-    [/^#\/team$/, 'team', viewTeam],
+    [/^#\/(?:login|team)$/, 'login', viewLogin],
     [/^#\/hub$/, 'hub', viewHub],
     [/^#\/vote\/([\w-]+)$/, 'ballot', viewBallot],
     [/^#\/done\/([\w-]+)$/, 'done', viewDone],
@@ -227,7 +272,7 @@
   }
   function requireAuth() {
     if (S.me) return true;
-    go('#/team');
+    go('#/login');
     return false;
   }
 
@@ -239,14 +284,13 @@
     FX.setLevel('low');
     const st = S.state;
     const anyPub = st.competitions.some((c) => c.published);
-    const needPin = st.settings.requirePin;
     app.innerHTML = `
 <section class="screen landing">
   <header class="topbar">${brand()}${soundBtn()}</header>
   <div class="hero">
     <p class="hero-hi" lang="hi">शुभ दीपावली</p>
     <h1 class="hero-title gold-text">${esc(st.settings.eventTitle)}</h1>
-    <p class="hero-lead">${st.competitions.length} sparkling competitions · ${st.teams.length} teams · 1 link.<br>Your scores decide who shines brightest this Diwali.</p>
+    <p class="hero-lead">${st.competitions.length} sparkling competitions · ${st.teams.length} teams · every Mobilian votes.<br>Your scores decide who shines brightest this Diwali.</p>
     <div class="hero-diyas" aria-hidden="true">${Art.diya({ cls: 'sm' })}${Art.diya({ cls: 'md' })}${Art.diya({ cls: 'sm' })}</div>
   </div>
   <div class="mini-cards">
@@ -255,15 +299,15 @@
   <div class="cta-stack">
     ${
       S.me
-        ? `<a class="btn btn-gold btn-lg" href="#/hub">Continue as ${esc(myTeamName())} ${ICONS.next}</a>`
-        : `<a class="btn btn-gold btn-lg" href="#/team">Cast your team’s vote ${ICONS.next}</a>`
+        ? `<a class="btn btn-gold btn-lg" href="#/hub">Continue as ${esc(firstName())} ${ICONS.next}</a>`
+        : `<a class="btn btn-gold btn-lg" href="#/login">${IC_MAIL} Log in with your office email</a>`
     }
     ${anyPub ? `<a class="btn btn-ghost" href="#/results">${ICONS.trophy} See the winners</a>` : ''}
   </div>
   <ol class="how">
-    <li><b>Pick your team</b><span>${needPin ? 'Enter the team PIN from your team lead.' : 'Choose your team from the list.'}</span></li>
-    <li><b>Score 1 – 10</b><span>${st.competitions.map((c) => esc(c.title)).join(', ')}.</span></li>
-    <li><b>Submit</b><span>Winners are revealed live at the celebration.</span></li>
+    <li><b>Log in with your office email</b><span>Use the email address you use at work.</span></li>
+    <li><b>Enter the 6-digit code</b><span>We send a one-time code to your inbox. No password needed.</span></li>
+    <li><b>Score 1 – 10 and submit</b><span>${st.competitions.map((c) => esc(c.title)).join(', ')}. Winners are revealed live at the celebration.</span></li>
   </ol>
   <footer class="foot">
     <button class="link-btn" type="button" id="replay">${ICONS.play} Replay intro</button>
@@ -274,76 +318,218 @@
     enableSkyTaps($('.landing'));
   }
 
-  function viewTeam() {
+  /* ---------------- login: office email → 6-digit code ---------------- */
+  function viewLogin() {
+    if (S.me) return go('#/hub');
     setDeco('full');
     FX.setLevel('calm');
-    const st = S.state;
     app.innerHTML = `
-<section class="screen team-screen">
+<section class="screen login-screen">
   <header class="topbar"><a class="icon-btn" href="#/" aria-label="Back">${ICONS.back}</a>${brand('sm')}${soundBtn()}</header>
-  <h1 class="h1">Which team are you?</h1>
-  <p class="muted">${st.settings.requirePin ? 'One vote per team. Your team lead has the team PIN.' : 'One vote per team, so choose carefully!'}</p>
-  <div class="team-grid">
-    ${st.teams.map((t, i) => `<button class="team-btn" type="button" data-id="${esc(t.id)}"><span class="team-no">${i + 1}</span><span class="team-name">${esc(t.name)}</span></button>`).join('')}
+  <div class="login-card">
+    <div class="login-diya" aria-hidden="true">${Art.diya({ cls: 'md' })}</div>
+    <div id="loginBody"></div>
   </div>
 </section>`;
-    $('.team-grid').addEventListener('click', (e) => {
-      const b = e.target.closest('.team-btn');
-      if (!b) return;
-      const team = st.teams.find((t) => t.id === b.dataset.id);
-      if (!team) return;
-      $$('.team-btn').forEach((x) => x.classList.toggle('is-sel', x === b));
-      Sound.unlock();
-      Sound.tap(6);
-      openLogin(team);
-    });
-  }
+    const body = $('#loginBody');
+    let timer = null;
+    S.cleanup.push(() => clearInterval(timer));
 
-  function openLogin(team) {
-    const needPin = S.state.settings.requirePin;
-    const s = sheet(
-      `<h2 class="sheet-title">${needPin ? 'Enter team PIN' : 'Confirm your team'}</h2>
-<p class="muted">Voting as <b class="gold">${esc(team.name)}</b></p>
-<form class="pin-form" novalidate>
-  ${needPin ? `<input class="pin-input" id="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" placeholder="••••" aria-label="Team PIN" autofocus>` : ''}
-  <p class="form-error" role="alert"></p>
-  <div class="sheet-actions">
-    <button class="btn btn-ghost" type="button" data-close>Cancel</button>
-    <button class="btn btn-gold" type="submit">${needPin ? 'Enter' : 'Yes, that’s us'}</button>
-  </div>
-</form>`,
-      { label: 'Team login' }
-    );
-    const form = s.el.querySelector('form');
-    const input = s.el.querySelector('#pin');
-    const err = s.el.querySelector('.form-error');
-    if (input) input.addEventListener('input', () => (input.value = input.value.replace(/\D/g, '').slice(0, 6)));
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
+    if (!emailReady()) {
+      body.innerHTML = `
+<h1 class="h1">Almost there! 🪔</h1>
+<p class="muted login-lead">Email login isn’t switched on yet. Please check back soon.</p>
+<a class="btn btn-ghost wide" href="#/">Back to the celebration</a>`;
+      return;
+    }
+
+    const pending = getPending();
+    if (pending) showCode(pending);
+    else showEmail();
+
+    function showEmail(msg = '') {
+      clearInterval(timer);
+      const remembered = LS.get('dw_email') || '';
+      body.innerHTML = `
+<h1 class="h1">Log in to vote</h1>
+<p class="muted login-lead">Use your office email. We’ll send you a 6-digit code, no password needed.</p>
+<form class="login-form" id="emailForm" novalidate>
+  <label class="field-lbl" for="email">Office email</label>
+  <input class="text-input" id="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="you@mobilise.co.in" value="${esc(remembered)}">
+  <p class="form-error" role="alert">${esc(msg)}</p>
+  <button class="btn btn-gold btn-lg wide" type="submit">${IC_MAIL} Send login code</button>
+</form>
+<p class="login-note faint">Only employees on the Diwali Utsav list can log in.</p>`;
+      const form = $('#emailForm');
+      const input = $('#email');
+      const err = form.querySelector('.form-error');
       const btn = form.querySelector('[type=submit]');
-      if (input && !input.value) {
-        err.textContent = 'Please enter your team PIN.';
-        return;
-      }
+      setTimeout(() => input.focus({ preventScroll: true }), 60);
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (btn.disabled) return;
+        const email = input.value.trim().toLowerCase();
+        if (!EMAIL_RE.test(email)) {
+          err.classList.remove('is-info');
+          err.textContent = 'Please enter a valid email address.';
+          shake(form);
+          input.focus();
+          return;
+        }
+        sendCode(email, { btn, err, box: form });
+      });
+    }
+
+    /** Countdown on a button after the server says "wait" (email step). */
+    function countdownButton(btn, ms) {
+      const end = Date.now() + ms;
+      const label = btn.innerHTML;
       btn.disabled = true;
-      err.textContent = '';
+      clearInterval(timer);
+      const t = () => {
+        if (!document.body.contains(btn)) return clearInterval(timer);
+        const left = Math.ceil((end - Date.now()) / 1000);
+        if (left <= 0) {
+          clearInterval(timer);
+          btn.disabled = false;
+          btn.innerHTML = label;
+          return;
+        }
+        btn.textContent = `Try again in ${fmtWait(left)}`;
+      };
+      t();
+      timer = setInterval(t, 1000);
+    }
+
+    async function sendCode(email, ui, resend) {
+      ui.btn.disabled = true;
+      ui.err.classList.add('is-info');
+      ui.err.textContent = resend ? 'Sending a new code…' : 'Sending your code…';
+      Sound.unlock();
       try {
-        const d = await api('/api/login', { method: 'POST', auth: false, body: { teamId: team.id, pin: input ? input.value : '' } });
-        token.set(d.token);
-        S.me = { team: d.team, ballots: d.ballots };
-        s.close();
-        Sound.chime(880, 0.14);
-        go('#/hub');
+        const d = await api('/api/otp/request', { method: 'POST', auth: false, body: { email } });
+        const now = Date.now();
+        const p = { email: (d && d.email) || email, sentAt: now, resendAt: now + (Number(d && d.resendInSec) || 45) * 1000 };
+        LS.set('dw_email', p.email);
+        setPending(p);
+        if (S.view === 'login') showCode(p, resend ? 'A new code is on its way. Please use the newest email.' : '');
       } catch (ex) {
-        err.textContent = ex.message;
-        btn.disabled = false;
-        form.classList.remove('shake');
-        void form.offsetWidth;
-        form.classList.add('shake');
-        vibrate([30, 40, 30]);
-        if (input) input.select();
+        if (!document.body.contains(ui.btn)) return; // left the page meanwhile
+        ui.btn.disabled = false;
+        ui.err.classList.remove('is-info');
+        ui.err.textContent = ex.message;
+        if (ex.code === 'WAIT') {
+          const waitMs = Math.max(1, Number(ex.data && ex.data.retryInSec) || 45) * 1000;
+          if (resend && ui.p) {
+            ui.p.resendAt = Date.now() + waitMs;
+            setPending(ui.p);
+            ui.btn.disabled = true;
+            return;
+          }
+          const prev = getPending();
+          if (prev && prev.email === email) {
+            // A code was emailed moments ago: go back to the code step.
+            prev.resendAt = Date.now() + waitMs;
+            setPending(prev);
+            return showCode(prev, ex.message);
+          }
+          return countdownButton(ui.btn, waitMs);
+        }
+        if (ex.code === 'EMAIL_OFF') refreshState();
+        shake(ui.box);
       }
-    });
+    }
+
+    function showCode(p, msg = '') {
+      clearInterval(timer);
+      body.innerHTML = `
+<h1 class="h1">Check your inbox 📩</h1>
+<p class="muted login-lead">We sent a 6-digit code to <b class="gold">${esc(p.email)}</b>. It works for 10 minutes.</p>
+<form class="login-form" id="codeForm" novalidate>
+  <label class="field-lbl" for="code">Login code</label>
+  <input class="pin-input otp-input" id="code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="••••••">
+  <p class="form-error${msg ? ' is-info' : ''}" role="alert">${esc(msg)}</p>
+  <button class="btn btn-gold btn-lg wide" type="submit">Verify &amp; continue ${ICONS.next}</button>
+</form>
+<div class="login-links">
+  <button class="link-btn" type="button" id="resendBtn" disabled>Resend code</button>
+  <button class="link-btn" type="button" id="changeEmail">Use a different email</button>
+</div>
+<p class="login-note faint">Can’t find it? Check your Spam or Promotions folder.</p>`;
+      const form = $('#codeForm');
+      const input = $('#code');
+      const err = form.querySelector('.form-error');
+      const btn = form.querySelector('[type=submit]');
+      const resendBtn = $('#resendBtn');
+      let busy = false;
+      setTimeout(() => input.focus({ preventScroll: true }), 60);
+
+      const tick = () => {
+        if (!document.body.contains(resendBtn)) return clearInterval(timer);
+        const left = Math.ceil(((p.resendAt || 0) - Date.now()) / 1000);
+        if (left > 0) {
+          resendBtn.disabled = true;
+          resendBtn.textContent = `Resend code in ${fmtWait(left)}`;
+        } else {
+          resendBtn.disabled = false;
+          resendBtn.textContent = 'Resend code';
+        }
+      };
+      tick();
+      timer = setInterval(tick, 1000);
+
+      async function verify() {
+        const code = input.value.replace(/\D/g, '');
+        if (code.length !== 6) {
+          err.classList.remove('is-info');
+          err.textContent = 'Please enter the 6-digit code from the email.';
+          shake(form);
+          return;
+        }
+        if (busy) return;
+        busy = true;
+        btn.disabled = true;
+        err.classList.remove('is-info');
+        err.textContent = '';
+        try {
+          const d = await api('/api/otp/verify', { method: 'POST', auth: false, body: { email: p.email, code } });
+          token.set(d.token);
+          S.me = { voter: d.voter, ballots: d.ballots || {} };
+          setPending(null);
+          Sound.unlock();
+          Sound.chime(880, 0.14);
+          go('#/hub');
+        } catch (ex) {
+          busy = false;
+          btn.disabled = false;
+          if (ex.code === 'EXPIRED') {
+            setPending(null);
+            return showEmail(ex.message);
+          }
+          let m = ex.message;
+          const left = ex.data && ex.data.attemptsLeft;
+          if (ex.code === 'OTP' && typeof left === 'number') m += ` ${left} ${left === 1 ? 'try' : 'tries'} left.`;
+          err.textContent = m;
+          shake(form);
+          input.select();
+        }
+      }
+
+      input.addEventListener('input', () => {
+        const v = input.value.replace(/\D/g, '').slice(0, 6);
+        if (v !== input.value) input.value = v;
+        if (v.length === 6) verify();
+      });
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        verify();
+      });
+      resendBtn.addEventListener('click', () => sendCode(p.email, { btn: resendBtn, err, box: form, p }, true));
+      $('#changeEmail').addEventListener('click', () => {
+        setPending(null);
+        showEmail();
+      });
+    }
   }
 
   function compCard(c) {
@@ -385,12 +571,14 @@
     FX.setLevel('calm');
     const comps = S.state.competitions;
     const done = comps.filter((c) => S.me.ballots[c.id]).length;
+    const team = myTeamName();
     app.innerHTML = `
 <section class="screen hub">
-  <header class="topbar">${brand('sm')}<div class="topbar-actions">${soundBtn()}<button class="chip-btn" type="button" id="switchTeam">${ICONS.swap} Switch team</button></div></header>
+  <header class="topbar">${brand('sm')}<div class="topbar-actions">${soundBtn()}<button class="chip-btn" type="button" id="logoutBtn">${IC_LOGOUT} Log out</button></div></header>
   <div class="hub-hello">
-    <p class="kicker">Namaste <span aria-hidden="true">🙏</span></p>
-    <h1 class="h1">${esc(myTeamName())}</h1>
+    <p class="kicker">Namaste, ${esc(firstName())} <span aria-hidden="true">🙏</span></p>
+    <h1 class="h1">${esc(myName())}</h1>
+    ${team ? `<span class="team-chip">${ICONS.teams} Team: ${esc(team)}</span>` : ''}
     <div class="hub-progress">
       <div class="hp-diyas" aria-hidden="true">${comps.map((c) => Art.diya({ lit: !!S.me.ballots[c.id], cls: 'xs' })).join('')}</div>
       <p><b>${done} of ${comps.length}</b> votes cast${done === comps.length ? ' · all done! 🎉' : ''}</p>
@@ -399,16 +587,16 @@
   <div class="comp-list">${comps.map(compCard).join('')}</div>
   ${comps.some((c) => c.published) ? `<a class="btn btn-ghost wide" href="#/results">${ICONS.trophy} See the winners</a>` : ''}
 </section>`;
-    $('#switchTeam').addEventListener('click', () => {
+    $('#logoutBtn').addEventListener('click', () => {
       const s = sheet(
-        `<h2 class="sheet-title">Switch team?</h2>
-<p class="muted">You’ll need the other team’s PIN to log in again.</p>
-<div class="sheet-actions"><button class="btn btn-ghost" type="button" data-close>Stay</button><button class="btn btn-gold" type="button" id="doSwitch">Switch team</button></div>`,
-        { label: 'Switch team' }
+        `<h2 class="sheet-title">Log out?</h2>
+<p class="muted">To log in again you’ll need a new code from your email. Votes you have already submitted stay safe.</p>
+<div class="sheet-actions"><button class="btn btn-ghost" type="button" data-close>Stay</button><button class="btn btn-gold" type="button" id="doLogout">Log out</button></div>`,
+        { label: 'Log out' }
       );
-      s.el.querySelector('#doSwitch').addEventListener('click', () => {
+      s.el.querySelector('#doLogout').addEventListener('click', () => {
         s.close();
-        logout();
+        logout('', '#/');
       });
     });
   }
@@ -449,16 +637,28 @@
     FX.setLevel('off');
     const draft = getDraft(c.id);
     const n = entries.length;
+    const v = S.me.voter;
+    const ownTeamOn = !!(c.noOwnTeam && v.teamId);
+    const selfNote =
+      c.kind === 'teams'
+        ? ownTeamOn && c.entries.some((e) => e.id === v.teamId)
+          ? 'Your own team isn’t on the list.'
+          : ''
+        : ownTeamOn && c.entries.some((e) => e.teamId === v.teamId && e.id !== v.id)
+          ? 'You and your team-mates aren’t on the list: no voting for your own team 😉'
+          : c.entries.some((e) => e.id === v.id)
+            ? 'You’re not on the list: no voting for yourself 😉'
+            : '';
     app.innerHTML = `
 <section class="screen ballot k-${c.kind}">
   <header class="ballot-head">
     <a class="icon-btn" href="#/hub" aria-label="Back to competitions">${ICONS.back}</a>
-    <div class="bh-titles"><h1>${esc(c.title)}</h1><p>${esc(myTeamName())} is scoring</p></div>
+    <div class="bh-titles"><h1>${esc(c.title)}</h1><p>Scoring as ${esc(myName())}</p></div>
     <div class="bh-count" aria-live="polite"><b id="ratedCount">0</b><span>/${n}</span></div>
     <div class="bh-bar" aria-hidden="true"><span id="ratedBar"></span></div>
   </header>
   <p class="ballot-help">Tap a number, or slide your finger across, to score each ${noun(c, 1)}. <b>1</b> = okay · <b>10</b> = dazzling ✨${
-      c.kind === 'teams' ? '<br><span class="faint">Your own team isn’t on the list.</span>' : ''
+      selfNote ? `<br><span class="faint">${selfNote}</span>` : ''
     }</p>
   ${n > 8 ? `<label class="search">${ICONS.search}<input type="search" id="q" placeholder="Search a name" autocomplete="off" aria-label="Search names"></label>` : ''}
   <ol class="entry-list" id="entryList">${entries.map((e, i) => entryRow(e, i, draft[e.id])).join('')}</ol>
@@ -482,39 +682,39 @@
       reviewBtn.textContent = rated < n ? `${n - rated} left to score` : 'Review & submit';
       nextBtn.hidden = rated === n;
     }
-    function paint(li, v) {
+    function paint(li, val) {
       li.classList.add('rated');
       li.querySelector('.entry-no').innerHTML = ICONS.check;
       li.querySelectorAll('.sc').forEach((b) => {
         const k = +b.dataset.v;
-        b.classList.toggle('lit', k <= v);
-        b.classList.toggle('sel', k === v);
-        b.setAttribute('aria-checked', String(k === v));
-        b.tabIndex = k === v ? 0 : -1;
+        b.classList.toggle('lit', k <= val);
+        b.classList.toggle('sel', k === val);
+        b.setAttribute('aria-checked', String(k === val));
+        b.tabIndex = k === val ? 0 : -1;
       });
-      li.querySelector('.entry-score').innerHTML = scoreLabel(v);
+      li.querySelector('.entry-score').innerHTML = scoreLabel(val);
     }
-    function setValue(li, v) {
+    function setValue(li, val) {
       const eid = li.dataset.id;
-      if (draft[eid] === v) return false;
-      draft[eid] = v;
+      if (draft[eid] === val) return false;
+      draft[eid] = val;
       setDraft(c.id, draft);
-      paint(li, v);
+      paint(li, val);
       update();
-      Sound.tap(v);
-      vibrate(v === 10 ? [8, 30, 8] : 6);
+      Sound.tap(val);
+      vibrate(val === 10 ? [8, 30, 8] : 6);
       return true;
     }
-    function sparkAt(li, v) {
-      const b = li.querySelector(`.sc[data-v="${v}"]`);
+    function sparkAt(li, val) {
+      const b = li.querySelector(`.sc[data-v="${val}"]`);
       if (!b) return;
       const r = b.getBoundingClientRect();
       FX.spark(r.left + r.width / 2, r.top + r.height / 2, {
-        count: 4 + v,
-        power: 0.55 + v / 14,
-        palette: v >= 9 ? ['gold', 'rani'] : ['gold', 'marigold'],
+        count: 4 + val,
+        power: 0.55 + val / 14,
+        palette: val >= 9 ? ['gold', 'rani'] : ['gold', 'marigold'],
       });
-      if (v === 10) Sound.sparkle();
+      if (val === 10) Sound.sparkle();
     }
     function valueAt(scale, x) {
       const r = scale.getBoundingClientRect();
@@ -529,9 +729,9 @@
       if (!b) return;
       if (lastDrag && Date.now() - lastDrag.t < 350 && lastDrag.scale.contains(b)) return;
       const li = b.closest('.entry');
-      const v = +b.dataset.v;
-      setValue(li, v);
-      sparkAt(li, v);
+      const val = +b.dataset.v;
+      setValue(li, val);
+      sparkAt(li, val);
     });
 
     // Slide across the numbers to score (horizontal drag only; vertical drags scroll).
@@ -563,8 +763,8 @@
     const endDrag = (e) => {
       if (!drag || (e && e.pointerId !== drag.id)) return;
       if (drag.active) {
-        const v = draft[drag.li.dataset.id];
-        if (v) sparkAt(drag.li, v);
+        const val = draft[drag.li.dataset.id];
+        if (val) sparkAt(drag.li, val);
         lastDrag = { scale: drag.scale, t: Date.now() };
       }
       drag = null;
@@ -578,16 +778,16 @@
       if (!b) return;
       const li = b.closest('.entry');
       const cur = draft[li.dataset.id] || 0;
-      let v = null;
-      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') v = Math.min(10, cur + 1);
-      else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') v = Math.max(1, (cur || 2) - 1);
-      else if (e.key === 'Home') v = 1;
-      else if (e.key === 'End') v = 10;
-      else if (/^[0-9]$/.test(e.key)) v = e.key === '0' ? 10 : +e.key;
-      if (v == null) return;
+      let val = null;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') val = Math.min(10, cur + 1);
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') val = Math.max(1, (cur || 2) - 1);
+      else if (e.key === 'Home') val = 1;
+      else if (e.key === 'End') val = 10;
+      else if (/^[0-9]$/.test(e.key)) val = e.key === '0' ? 10 : +e.key;
+      if (val == null) return;
       e.preventDefault();
-      setValue(li, v);
-      li.querySelector(`.sc[data-v="${v}"]`).focus();
+      setValue(li, val);
+      li.querySelector(`.sc[data-v="${val}"]`).focus();
     });
 
     if (q) {
@@ -627,9 +827,9 @@
       .sort((a, b) => b.v - a.v || a.e.name.localeCompare(b.e.name));
     const s = sheet(
       `<h2 class="sheet-title">Review your scores</h2>
-<p class="muted">${esc(myTeamName())} · ${esc(c.title)}</p>
+<p class="muted">${esc(myName())} · ${esc(c.title)}</p>
 <ol class="review-list">${rows.map((r) => `<li><span>${esc(r.e.name)}</span><b class="rv-score" style="--k:${r.v}">${r.v}</b></li>`).join('')}</ol>
-<p class="warn">${ICONS.lock} Once submitted, your team’s scores are locked.</p>
+<p class="warn">${ICONS.lock} Once submitted, your scores are locked.</p>
 <p class="form-error" role="alert"></p>
 <div class="sheet-actions"><button class="btn btn-ghost" type="button" data-close>Edit</button><button class="btn btn-gold" type="button" id="submitVotes">Submit votes 🪔</button></div>`,
       { label: 'Review your scores' }
@@ -644,7 +844,7 @@
       entries.forEach((e) => (scores[e.id] = draft[e.id]));
       try {
         const d = await api('/api/vote', { method: 'POST', body: { competitionId: c.id, scores } });
-        S.me = { team: d.team, ballots: d.ballots };
+        S.me = { voter: (d && d.voter) || S.me.voter, ballots: (d && d.ballots) || S.me.ballots };
         clearDraft(c.id);
         s.close();
         go('#/done/' + c.id);
@@ -653,7 +853,7 @@
         btn.textContent = 'Submit votes 🪔';
         if (ex.code === 'AUTH') {
           s.close();
-          return logout('Please log in with your team PIN again.');
+          return logout('Your login has expired. Please log in again with your office email.');
         }
         if (ex.code === 'ALREADY_VOTED' || ex.code === 'CLOSED') {
           s.close();
@@ -684,10 +884,10 @@
 <section class="screen done">
   <div class="done-diya">${Art.diya({ cls: 'xl' })}</div>
   <h1 class="h1 gold-text">Votes submitted!</h1>
-  <p class="lead">Thank you, <b>${esc(myTeamName())}</b>. Your scores for <b>${esc(c.title)}</b> are safely locked in.</p>
+  <p class="lead">Thank you, <b>${esc(firstName())}</b>. Your scores for <b>${esc(c.title)}</b> are safely locked in.</p>
   <div class="cta-stack narrow">
     ${next ? `<a class="btn btn-gold btn-lg" href="#/vote/${esc(next.id)}">Next: ${esc(next.title)} ${ICONS.next}</a>` : ''}
-    ${allDone ? `<p class="all-done">That’s all three! 🎆 Winners will be revealed at the celebration.</p>` : ''}
+    ${allDone ? `<p class="all-done">You’ve voted in every competition! 🎆 Winners will be revealed at the celebration.</p>` : ''}
     <a class="btn btn-ghost" href="#/hub">Back to competitions</a>
   </div>
 </section>`;
@@ -710,9 +910,9 @@
     app.innerHTML = `
 <section class="screen mine">
   <header class="topbar"><a class="icon-btn" href="#/hub" aria-label="Back">${ICONS.back}</a>${brand('sm')}${soundBtn()}</header>
-  <p class="kicker">Your team’s scores</p>
+  <p class="kicker">Your scores</p>
   <h1 class="h1">${esc(c.title)}</h1>
-  <p class="muted">Submitted by ${esc(myTeamName())} · ${esc(fmtTime(b.at))}</p>
+  <p class="muted">Submitted by ${esc(myName())} · ${esc(fmtTime(b.at))}</p>
   <ol class="review-list big">${rows.map((r) => `<li><span>${esc(r.name)}</span><b class="rv-score" style="--k:${r.v}">${r.v}</b></li>`).join('')}</ol>
 </section>`;
   }
@@ -774,6 +974,7 @@
   function startPolling() {
     setInterval(async () => {
       if (document.hidden || document.body.classList.contains('intro-active')) return;
+      S.polls++;
       const prev = S.state;
       let next;
       try {
@@ -781,23 +982,45 @@
       } catch (e) {
         return;
       }
-      if (JSON.stringify(prev) === JSON.stringify(next)) return;
-      S.state = next;
-      for (const c of next.competitions) {
-        const old = prev.competitions.find((o) => o.id === c.id);
-        if (!old) continue;
-        if (c.published && !old.published) toast(`🏆 Results for ${c.title} are out!`, { action: ['See winners', '#/results'], ms: 8000 });
-        else if (S.me && !S.me.ballots[c.id] && old.status !== c.status)
-          toast(c.status === 'open' ? `Voting for ${c.title} is now open!` : `Voting for ${c.title} has closed.`);
+      // Check the login every other poll: logs out removed employees, picks up ballots reset by the organiser.
+      let meChanged = false;
+      if (S.me && S.polls % 2 === 0) {
+        try {
+          const me = await api('/api/me');
+          if (me && me.voter) {
+            meChanged = JSON.stringify(me.ballots) !== JSON.stringify(S.me.ballots) || JSON.stringify(me.voter) !== JSON.stringify(S.me.voter);
+            S.me = { voter: me.voter, ballots: me.ballots || {} };
+          }
+        } catch (e) {
+          if (e.status === 401) {
+            S.state = next;
+            return logout('Your login has expired. Please log in again with your office email.');
+          }
+        }
       }
-      if (S.me && !next.teams.some((t) => t.id === S.me.team.id)) return logout('Your team was changed by the organiser. Please pick it again.');
+      const stateChanged = JSON.stringify(prev) !== JSON.stringify(next);
+      if (!stateChanged && !meChanged) return;
+      S.state = next;
+      if (stateChanged) {
+        for (const c of next.competitions) {
+          const old = prev.competitions.find((o) => o.id === c.id);
+          if (!old) continue;
+          if (c.published && !old.published) toast(`🏆 Results for ${c.title} are out!`, { action: ['See winners', '#/results'], ms: 8000 });
+          else if (S.me && !S.me.ballots[c.id] && old.status !== c.status)
+            toast(c.status === 'open' ? `Voting for ${c.title} is now open!` : `Voting for ${c.title} has closed.`);
+        }
+      }
 
-      if (S.view === 'ballot') {
+      if (S.view === 'login') {
+        const wasReady = !!(prev.emailLogin && prev.emailLogin.ready);
+        if (wasReady !== emailReady() && !document.querySelector('.sheet-wrap')) render();
+      } else if (S.view === 'ballot') {
+        if (!stateChanged) return;
         const id = (location.hash.match(/^#\/vote\/([\w-]+)/) || [])[1];
         const c = comp(id);
         const old = prev.competitions.find((o) => o.id === id);
         if (!c || c.status !== 'open') go('#/hub');
-        else if (old && JSON.stringify(old.entries) !== JSON.stringify(c.entries)) {
+        else if (old && (JSON.stringify(old.entries) !== JSON.stringify(c.entries) || old.noOwnTeam !== c.noOwnTeam)) {
           toast('The list was updated by the organiser.');
           const y = window.scrollY;
           render();
@@ -831,23 +1054,19 @@
     $$('[data-sound-toggle]').forEach(Sound.syncButton);
     app.innerHTML = `<div class="loading"><div class="loading-diya">${Art.diya({ cls: 'md' })}</div><p>Lighting the diyas…</p></div>`;
     await loadState();
+    if (token.get()) await refreshMe(); // old team logins are rejected by the server and cleared here
 
-    // Personal invite links: /?team=<id>&pin=<pin> log the team straight in.
     const qs = new URLSearchParams(location.search);
     const wantsIntro = qs.has('intro');
-    if (qs.get('team')) {
-      try {
-        const d = await api('/api/login', { method: 'POST', auth: false, body: { teamId: qs.get('team'), pin: qs.get('pin') || '' } });
-        token.set(d.token);
-        S.me = { team: d.team, ballots: d.ballots };
-        history.replaceState(null, '', location.pathname + '#/hub');
-      } catch (e) {
-        history.replaceState(null, '', location.pathname + '#/team');
-        setTimeout(() => toast(e.message, { error: true, ms: 6000 }), 600);
-      }
-    } else {
-      if (token.get()) await refreshMe();
-      if (wantsIntro) history.replaceState(null, '', location.pathname + location.hash);
+    if (qs.get('email')) LS.set('dw_email', qs.get('email').trim().toLowerCase()); // /?email=… pre-fills the login form
+    if (qs.has('team') || qs.has('pin')) {
+      // Old team invite links: team voting has been replaced by personal email login.
+      history.replaceState(null, '', location.pathname + (S.me ? '#/hub' : '#/login'));
+      setTimeout(() => toast('Team links are retired: everyone now logs in with their own office email.', { ms: 6000 }), 600);
+    } else if (qs.has('email')) {
+      history.replaceState(null, '', location.pathname + (S.me ? '#/hub' : '#/login'));
+    } else if (wantsIntro) {
+      history.replaceState(null, '', location.pathname + location.hash);
     }
 
     window.addEventListener('hashchange', render);

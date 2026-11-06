@@ -1,11 +1,12 @@
 'use strict';
 /**
- * Mobilise Diwali Utsav 2026 — voting server
+ * Mobilise Diwali Utsav 2026 — voting server (v2: every employee votes, email OTP login)
  * ------------------------------------------------------------
- * Zero dependencies (Node 18+). Serves the web app from /public and a
- * small JSON API. Data is kept in data/db.json.
+ * Node 18+. Serves the web app from /public and a small JSON API.
+ * Only dependency: nodemailer (for the login-code emails). Run `npm install` once.
+ * Data is kept in data/db.json, or in Upstash Redis (see below).
  *
- *   node server.js                      -> http://localhost:3000
+ *   npm install && node server.js        -> http://localhost:3000
  *
  * Environment variables (all optional):
  *   PORT            default 3000
@@ -18,6 +19,8 @@
  *                   data/db.json. Use this on free hosts whose disk is wiped on
  *                   restart (e.g. Render free).
  *   REDIS_KEY       default "mobilise-diwali-utsav"
+ *
+ * SMTP (for the login codes) is configured by the organiser in /admin → Setup.
  */
 const http = require('http');
 const fs = require('fs');
@@ -33,11 +36,24 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const MAX_BODY = 3 * 1024 * 1024; // owner photo upload arrives as a data URL
+const MAX_BODY = 3 * 1024 * 1024; // owner photo upload arrives as a data URL; employee imports can be large
 const UPSTASH_URL = String(process.env.UPSTASH_REDIS_REST_URL || '').trim().replace(/\/+$/, '');
 const UPSTASH_TOKEN = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
 const REDIS_KEY = process.env.REDIS_KEY || 'mobilise-diwali-utsav';
 const USE_REDIS = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
+// Login codes
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_TRIES = 5;
+const OTP_RESEND_MS = 45 * 1000;
+const OTP_EMAIL_WINDOW_MS = 30 * 60 * 1000;
+const OTP_EMAIL_MAX = 5;
+const OTP_IP_WINDOW_MS = 15 * 60 * 1000;
+// Everyone in the office shares one public IP (NAT), so this limit is generous on purpose.
+const OTP_IP_MAX = 300;
+const SMTP_TIMEOUT_MS = 12000;
+const RENDER_SMTP_HINT =
+  "Render's free plan blocks ports 25, 465 and 587 — use port 2525 (Brevo, SendGrid, Mailgun, SMTP2GO) or a paid instance.";
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -76,9 +92,11 @@ const DEFAULT_OWNER_MESSAGE =
   'Thank you, Team Mobilise, for making every day brighter. Wishing you and your families a joyful, prosperous Deepawali!';
 
 const COMPETITION_DEFAULTS = [
-  { id: 'desk', kind: 'teams', title: 'Best Desk', subtitle: 'Score every other team’s Diwali desk décor', status: 'open', published: false },
-  { id: 'dress-male', kind: 'male', title: 'Best Dress (Male)', subtitle: 'Score the gentlemen’s festive looks', status: 'open', published: false },
-  { id: 'dress-female', kind: 'female', title: 'Best Dress (Female)', subtitle: 'Score the ladies’ festive looks', status: 'open', published: false },
+  // noOwnTeam: organiser setting. Desk → a voter can't score their own team's desk.
+  // Dress → a voter can't score people from their own team. (Nobody can ever score themself.)
+  { id: 'desk', kind: 'teams', title: 'Best Desk', subtitle: 'Score every other team’s Diwali desk décor', status: 'open', published: false, noOwnTeam: true },
+  { id: 'dress-male', kind: 'male', title: 'Best Dress (Male)', subtitle: 'Score the gentlemen’s festive looks', status: 'open', published: false, noOwnTeam: false },
+  { id: 'dress-female', kind: 'female', title: 'Best Dress (Female)', subtitle: 'Score the ladies’ festive looks', status: 'open', published: false, noOwnTeam: false },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -86,17 +104,25 @@ const COMPETITION_DEFAULTS = [
 /* ------------------------------------------------------------------ */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const newId = (prefix) => prefix + crypto.randomBytes(4).toString('hex');
-const randomPin = (taken = new Set()) => {
-  for (let i = 0; i < 1000; i++) {
-    const pin = String(crypto.randomInt(0, 10000)).padStart(4, '0');
-    if (!taken.has(pin)) return pin;
-  }
-  return String(crypto.randomInt(0, 10000)).padStart(4, '0');
-};
 const cleanText = (v, max) => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 const cleanMultiline = (v, max) => String(v == null ? '' : v).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim().slice(0, max);
-const validPin = (p) => typeof p === 'string' && /^\d{4,6}$/.test(p);
 const round2 = (n) => Math.round(n * 100) / 100;
+const EMAIL_RE = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+\.[^\s@<>()",;:\\[\]]+$/;
+const normEmail = (v) => String(v == null ? '' : v).trim().toLowerCase().slice(0, 254);
+const validEmail = (e) => !!e && e.length <= 254 && EMAIL_RE.test(e);
+const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function normGender(g) {
+  const s = String(g == null ? '' : g).trim().toLowerCase().replace(/\.$/, '');
+  if (['m', 'male', 'man', 'men', 'boy', 'gent', 'gents', 'mr'].includes(s)) return 'M';
+  if (['f', 'female', 'woman', 'women', 'girl', 'lady', 'ladies', 'ms', 'mrs', 'miss'].includes(s)) return 'F';
+  return '';
+}
+
+function maskEmail(e) {
+  const [u, d] = String(e).split('@');
+  return d ? `${u.slice(0, 2)}***@${d}` : '***';
+}
 
 function httpError(status, message, code) {
   const e = new Error(message);
@@ -117,53 +143,98 @@ function safeEqual(a, b) {
 /* ------------------------------------------------------------------ */
 let db;
 
+function defaultSmtp() {
+  return { host: '', port: 587, secure: false, user: '', pass: '', fromEmail: '', fromName: 'Mobilise Diwali Utsav' };
+}
+
 function defaultDb() {
-  const taken = new Set();
-  const teams = Array.from({ length: 10 }, (_, i) => {
-    const pin = randomPin(taken);
-    taken.add(pin);
-    return { id: 't' + (i + 1), name: 'Team ' + (i + 1), pin };
-  });
   return {
-    version: 1,
+    version: 2,
     secret: crypto.randomBytes(32).toString('hex'),
     settings: {
       eventTitle: 'Diwali Utsav 2026',
-      requirePin: true,
       publicUrl: '',
       owner: { name: 'Ashish Sharma', title: 'Founder & Managing Director', message: DEFAULT_OWNER_MESSAGE, photo: '' },
+      smtp: defaultSmtp(),
     },
-    teams,
-    people: { male: [], female: [] },
+    teams: Array.from({ length: 10 }, (_, i) => ({ id: 't' + (i + 1), name: 'Team ' + (i + 1) })),
+    employees: [],
     competitions: COMPETITION_DEFAULTS.map((c) => ({ ...c })),
     ballots: [],
   };
 }
 
-/** Fill in anything missing (older/hand-edited files). */
+function normaliseSmtp(s) {
+  const src = s && typeof s === 'object' ? s : {};
+  const port = Number(src.port);
+  const fromEmail = normEmail(src.fromEmail);
+  return {
+    host: cleanText(src.host, 200),
+    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 587,
+    secure: !!src.secure,
+    user: cleanText(src.user, 254),
+    pass: typeof src.pass === 'string' ? src.pass.replace(/[\r\n]/g, '').slice(0, 500) : '',
+    fromEmail: validEmail(fromEmail) ? fromEmail : '',
+    fromName: cleanText(src.fromName, 80) || 'Mobilise Diwali Utsav',
+  };
+}
+
+/** Fill in anything missing and upgrade v1 (team PIN voting) data to v2 (employee voting). */
 function migrate(d) {
   const def = defaultDb();
   if (!d || typeof d !== 'object') return def;
-  d.version = 1;
   if (typeof d.secret !== 'string' || d.secret.length < 32) d.secret = def.secret;
-  d.settings = Object.assign({}, def.settings, d.settings || {});
-  d.settings.owner = Object.assign({}, def.settings.owner, (d.settings && d.settings.owner) || {});
-  if (!Array.isArray(d.teams)) d.teams = def.teams;
-  const taken = new Set();
-  d.teams = d.teams
+
+  const old = d.settings && typeof d.settings === 'object' ? d.settings : {};
+  d.settings = {
+    eventTitle: cleanText(old.eventTitle, 60) || def.settings.eventTitle,
+    publicUrl: typeof old.publicUrl === 'string' ? old.publicUrl : '',
+    owner: Object.assign({}, def.settings.owner, old.owner && typeof old.owner === 'object' ? old.owner : {}),
+    smtp: normaliseSmtp(Object.assign(defaultSmtp(), old.smtp && typeof old.smtp === 'object' ? old.smtp : {})),
+  }; // v1 settings.requirePin is dropped here
+
+  const seenTeams = new Set();
+  d.teams = (Array.isArray(d.teams) ? d.teams : def.teams)
     .filter((t) => t && t.name)
-    .map((t) => {
-      const pin = validPin(String(t.pin || '')) ? String(t.pin) : randomPin(taken);
-      taken.add(pin);
-      return { id: String(t.id || newId('t')), name: cleanText(t.name, 40), pin };
-    });
-  d.people = d.people && typeof d.people === 'object' ? d.people : {};
-  for (const k of ['male', 'female']) {
-    d.people[k] = (Array.isArray(d.people[k]) ? d.people[k] : [])
-      .map((p) => (typeof p === 'string' ? { id: newId(k[0]), name: p } : p))
-      .filter((p) => p && p.name)
-      .map((p) => ({ id: String(p.id || newId(k[0])), name: cleanText(p.name, 60) }));
+    .map((t) => ({ id: String(t.id || newId('t')), name: cleanText(t.name, 40) })) // v1 team pins are dropped here
+    .filter((t) => t.name && !seenTeams.has(t.id) && seenTeams.add(t.id));
+  const teamIds = new Set(d.teams.map((t) => t.id));
+
+  const employees = Array.isArray(d.employees) ? d.employees.slice() : [];
+  // v1 → v2: the old Best Dress name lists become participants without an email (they can't log in).
+  if (d.people && typeof d.people === 'object') {
+    for (const [k, g] of [['male', 'M'], ['female', 'F']]) {
+      for (const p of Array.isArray(d.people[k]) ? d.people[k] : []) {
+        const name = typeof p === 'string' ? p : p && p.name;
+        if (name) employees.push({ id: (p && p.id) || newId('e'), name, email: '', teamId: null, gender: g });
+      }
+    }
   }
+  delete d.people;
+  const seenIds = new Set();
+  const seenEmails = new Set();
+  d.employees = employees
+    .filter((e) => e && e.name)
+    .map((e) => {
+      const email = normEmail(e.email);
+      return {
+        id: String(e.id || newId('e')),
+        name: cleanText(e.name, 80),
+        email: validEmail(email) ? email : '',
+        teamId: e.teamId && teamIds.has(String(e.teamId)) ? String(e.teamId) : null,
+        gender: normGender(e.gender),
+      };
+    })
+    .filter((e) => {
+      if (!e.name || seenIds.has(e.id)) return false;
+      if (e.email) {
+        if (seenEmails.has(e.email)) return false;
+        seenEmails.add(e.email);
+      }
+      seenIds.add(e.id);
+      return true;
+    });
+
   const comps = Array.isArray(d.competitions) ? d.competitions : [];
   d.competitions = COMPETITION_DEFAULTS.map((base) => {
     const found = comps.find((c) => c && c.id === base.id) || {};
@@ -174,11 +245,22 @@ function migrate(d) {
       subtitle: cleanText(found.subtitle == null ? base.subtitle : found.subtitle, 120),
       status: found.status === 'closed' ? 'closed' : 'open',
       published: !!found.published,
+      noOwnTeam: found.noOwnTeam == null ? base.noOwnTeam : !!found.noOwnTeam,
     };
   });
+
+  // v2 ballots belong to an employee (voterId). v1 team ballots (teamId) are dropped.
+  const employeeIds = new Set(d.employees.map((e) => e.id));
   d.ballots = (Array.isArray(d.ballots) ? d.ballots : []).filter(
-    (b) => b && typeof b.teamId === 'string' && typeof b.competitionId === 'string' && b.scores && typeof b.scores === 'object'
+    (b) =>
+      b &&
+      typeof b.voterId === 'string' &&
+      employeeIds.has(b.voterId) &&
+      typeof b.competitionId === 'string' &&
+      b.scores &&
+      typeof b.scores === 'object'
   );
+  d.version = 2;
   return d;
 }
 
@@ -279,11 +361,12 @@ async function writeAtomic(file, data) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Auth (stateless signed tokens; they survive restarts and expire     */
-/* automatically when a team PIN or the admin password changes)        */
+/* Auth (stateless signed tokens; they survive restarts. A voter token */
+/* stops working when the employee is removed or their email changes)  */
 /* ------------------------------------------------------------------ */
 const sign = (s) => crypto.createHmac('sha256', db.secret).update(s).digest('base64url').slice(0, 32);
-const teamToken = (team) => `${team.id}.${sign(`team:${team.id}:${team.pin}`)}`;
+const voterSig = (e) => sign(`voter:${e.id}:${e.email}`);
+const voterToken = (e) => `v.${e.id}.${voterSig(e)}`;
 const adminToken = () => `admin.${sign(`admin:${ADMIN_PASSWORD}`)}`;
 
 function bearer(req) {
@@ -291,21 +374,16 @@ function bearer(req) {
   return h.startsWith('Bearer ') ? h.slice(7).trim() : '';
 }
 
-function teamFromRequest(req) {
-  const tok = bearer(req);
-  const i = tok.lastIndexOf('.');
-  if (i < 1) return null;
-  const team = db.teams.find((t) => t.id === tok.slice(0, i));
-  if (!team) return null;
-  return safeEqual(tok.slice(i + 1), sign(`team:${team.id}:${team.pin}`)) ? team : null;
+function voterFromRequest(req) {
+  const m = /^v\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(bearer(req));
+  if (!m) return null;
+  const e = db.employees.find((x) => x.id === m[1]);
+  if (!e || !e.email) return null;
+  return safeEqual(m[2], voterSig(e)) ? e : null;
 }
 
 const isAdmin = (req) => safeEqual(bearer(req), adminToken());
 
-// Simple brute-force protection for PINs / admin password.
-const attempts = new Map();
-const LIMIT = 10;
-const WINDOW_MS = 5 * 60 * 1000;
 function clientIp(req) {
   return (
     req.headers['cf-connecting-ip'] ||
@@ -314,6 +392,11 @@ function clientIp(req) {
     '?'
   );
 }
+
+// Brute-force protection for the admin password.
+const attempts = new Map();
+const LIMIT = 10;
+const WINDOW_MS = 5 * 60 * 1000;
 function isLocked(key) {
   const a = attempts.get(key);
   if (!a) return false;
@@ -330,26 +413,135 @@ function recordFailure(key) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Login codes (kept in memory only)                                   */
+/* ------------------------------------------------------------------ */
+const otps = new Map(); // email -> { hash, exp, tries }
+const otpSends = new Map(); // email -> [timestamps]
+const ipSends = new Map(); // ip -> [timestamps]
+const otpHash = (email, code) => crypto.createHash('sha256').update(`${db.secret}:${email}:${code}`).digest('hex');
+
+function recent(map, key, windowMs) {
+  const now = Date.now();
+  const list = (map.get(key) || []).filter((t) => now - t < windowMs);
+  map.set(key, list);
+  return list;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of otps) if (v.exp < now) otps.delete(k);
+  for (const [k, v] of otpSends) if (!v.some((t) => now - t < OTP_EMAIL_WINDOW_MS)) otpSends.delete(k);
+  for (const [k, v] of ipSends) if (!v.some((t) => now - t < OTP_IP_WINDOW_MS)) ipSends.delete(k);
+  for (const [k, v] of attempts) if (now - v.first > WINDOW_MS) attempts.delete(k);
+}, 10 * 60 * 1000).unref();
+
+/* ------------------------------------------------------------------ */
+/* Email                                                               */
+/* ------------------------------------------------------------------ */
+const smtpConfigured = () => !!(db.settings.smtp.host && db.settings.smtp.fromEmail);
+
+let transport = null;
+function getTransport() {
+  if (transport) return transport;
+  let nodemailer;
+  try {
+    nodemailer = require('nodemailer');
+  } catch (err) {
+    throw Object.assign(new Error('nodemailer is not installed — run "npm install" in the app folder.'), { code: 'ENOMAILER' });
+  }
+  const s = db.settings.smtp;
+  transport = nodemailer.createTransport({
+    host: s.host,
+    port: s.port,
+    secure: !!s.secure,
+    auth: s.user ? { user: s.user, pass: s.pass } : undefined,
+    connectionTimeout: SMTP_TIMEOUT_MS,
+    greetingTimeout: SMTP_TIMEOUT_MS,
+    socketTimeout: SMTP_TIMEOUT_MS,
+  });
+  return transport;
+}
+
+async function sendMail({ to, subject, text, html }) {
+  const s = db.settings.smtp;
+  return getTransport().sendMail({ from: { name: s.fromName, address: s.fromEmail }, to, subject, text, html });
+}
+
+/** Turn nodemailer errors into something an organiser can act on. Never includes the password. */
+function describeSmtpError(err) {
+  const code = (err && err.code) || '';
+  const msg = String((err && err.message) || err || 'Unknown error').replace(/\s+/g, ' ').slice(0, 300);
+  const where = `${db.settings.smtp.host}:${db.settings.smtp.port}`;
+  if (code === 'ENOMAILER') return msg;
+  if (code === 'EAUTH') return 'SMTP login failed — check username/password.';
+  if (/wrong version number|ssl3_get_record|packet length too long|unknown protocol/i.test(msg))
+    return `TLS mismatch talking to ${where} (${msg}). Port 465 needs “SSL/TLS” on; ports 587/2525 need it off (STARTTLS).`;
+  if (['ETIMEDOUT', 'ECONNREFUSED', 'ESOCKET', 'ECONNECTION', 'EDNS', 'ECONNRESET', 'EHOSTUNREACH', 'ENOTFOUND'].includes(code) || /timed? ?out|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(msg))
+    return `Could not connect to ${where} (${code || 'connection error'}: ${msg}). ${RENDER_SMTP_HINT}`;
+  if (code === 'EENVELOPE') return `The email address was rejected by the mail server: ${msg}`;
+  return `${code ? code + ': ' : ''}${msg}`;
+}
+
+function emailShell(title, inner) {
+  return `<!doctype html><html><body style="margin:0;padding:0;background:#00122E">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#00122E;padding:32px 12px;font-family:Arial,Helvetica,sans-serif">
+<tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;background:#0A2350;border:1px solid #6b5420;border-radius:18px;padding:28px 24px;color:#FFF5E1">
+<tr><td align="center" style="font-size:26px;line-height:1">🪔</td></tr>
+<tr><td align="center" style="padding-top:8px;font-size:13px;letter-spacing:2px;text-transform:uppercase;color:#FFC94A">${escHtml(title)}</td></tr>
+${inner}
+<tr><td align="center" style="padding-top:22px;font-size:12px;color:#c9c2b0">— Team Mobilise · Shubh Deepawali ✨</td></tr>
+</table></td></tr></table></body></html>`;
+}
+
+function otpEmail(emp, code) {
+  const title = db.settings.eventTitle;
+  const first = emp.name.split(/\s+/)[0] || emp.name;
+  return {
+    to: emp.email,
+    subject: `${code} is your ${title} login code`,
+    text: `Namaste ${first},\n\nYour login code for ${title} is: ${code}\n\nIt is valid for 10 minutes. If you did not ask for it, you can ignore this email.\n\n— Team Mobilise 🪔`,
+    html: emailShell(
+      title,
+      `<tr><td style="padding-top:18px;font-size:16px">Namaste ${escHtml(first)},</td></tr>
+<tr><td style="padding-top:8px;font-size:15px;color:#e8e1cf">Your login code is:</td></tr>
+<tr><td align="center" style="padding:18px 0 6px"><span style="display:inline-block;padding:14px 22px;border-radius:14px;background:#00122E;border:1px solid #FFC94A;font-size:34px;font-weight:bold;letter-spacing:8px;color:#FFC94A">${code}</span></td></tr>
+<tr><td align="center" style="font-size:13px;color:#c9c2b0">Valid for 10 minutes. If you did not ask for it, you can ignore this email.</td></tr>`
+    ),
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Domain                                                              */
 /* ------------------------------------------------------------------ */
+const teamNameOf = (teamId) => {
+  const t = teamId ? db.teams.find((x) => x.id === teamId) : null;
+  return t ? t.name : '';
+};
+
 function entriesFor(comp) {
   if (comp.kind === 'teams') return db.teams.map((t) => ({ id: t.id, name: t.name }));
-  return (db.people[comp.kind] || []).map((p) => ({ id: p.id, name: p.name }));
+  const g = comp.kind === 'male' ? 'M' : 'F';
+  return db.employees.filter((e) => e.gender === g).map((e) => ({ id: e.id, name: e.name, teamId: e.teamId || null }));
 }
 
-function entriesForVoter(comp, teamId) {
+/** What one voter has to score. Never themself; and when the organiser switched on
+ *  "noOwnTeam" for this competition, never their own team (desk) / own team-mates (dress). */
+function entriesForVoter(comp, voter) {
   const list = entriesFor(comp);
-  return comp.kind === 'teams' ? list.filter((e) => e.id !== teamId) : list;
+  const ownTeam = comp.noOwnTeam && voter.teamId ? voter.teamId : null;
+  if (comp.kind === 'teams') return ownTeam ? list.filter((e) => e.id !== ownTeam) : list;
+  return list.filter((e) => e.id !== voter.id && !(ownTeam && e.teamId === ownTeam));
 }
 
-/** Ranked results. Ranking is by average score (fair even if a team did not vote),
+/** Ranked results. Ranking is by average score (fair even if not everyone voted),
  *  then by number of votes; identical average + votes share a rank. */
 function computeResults(comp) {
   const rows = entriesFor(comp).map((e) => ({ id: e.id, name: e.name, total: 0, votes: 0, avg: 0, rank: 0 }));
   const byId = new Map(rows.map((r) => [r.id, r]));
-  const liveTeams = new Set(db.teams.map((t) => t.id));
+  const liveVoters = new Set(db.employees.map((e) => e.id));
   for (const b of db.ballots) {
-    if (b.competitionId !== comp.id || !liveTeams.has(b.teamId)) continue;
+    if (b.competitionId !== comp.id || !liveVoters.has(b.voterId)) continue;
     for (const [id, score] of Object.entries(b.scores)) {
       const r = byId.get(id);
       if (r && Number.isInteger(score)) {
@@ -372,7 +564,6 @@ function publicState() {
   return {
     settings: {
       eventTitle: s.eventTitle,
-      requirePin: s.requirePin,
       owner: { name: s.owner.name, title: s.owner.title, message: s.owner.message, photo: s.owner.photo },
     },
     teams: db.teams.map((t) => ({ id: t.id, name: t.name })),
@@ -383,6 +574,7 @@ function publicState() {
       subtitle: c.subtitle,
       status: c.status,
       published: c.published,
+      noOwnTeam: !!c.noOwnTeam,
       entries: entriesFor(c),
       // Only the top 3 are ever shown publicly, and only once the organiser publishes.
       podium: c.published
@@ -391,50 +583,151 @@ function publicState() {
             .map(({ id, name, avg, rank, votes }) => ({ id, name, avg, rank, votes }))
         : null,
     })),
+    emailLogin: { ready: smtpConfigured() },
   };
 }
 
-function meFor(team) {
+const voterView = (e) => ({ id: e.id, name: e.name, email: e.email, teamId: e.teamId, teamName: teamNameOf(e.teamId) });
+
+function meFor(voter) {
   const ballots = {};
-  for (const b of db.ballots) if (b.teamId === team.id) ballots[b.competitionId] = { at: b.at, scores: b.scores };
-  return { team: { id: team.id, name: team.name }, ballots };
+  for (const b of db.ballots) if (b.voterId === voter.id) ballots[b.competitionId] = { at: b.at, scores: b.scores };
+  return { voter: voterView(voter), ballots };
 }
 
 function adminData() {
+  const s = db.settings;
+  const teamName = new Map(db.teams.map((t) => [t.id, t.name]));
+  const members = new Map();
+  for (const e of db.employees) if (e.teamId) members.set(e.teamId, (members.get(e.teamId) || 0) + 1);
+  const votedBy = new Map();
+  for (const b of db.ballots) {
+    if (!votedBy.has(b.voterId)) votedBy.set(b.voterId, {});
+    votedBy.get(b.voterId)[b.competitionId] = b.at;
+  }
+  const voters = db.employees.filter((e) => e.email);
   return {
-    settings: db.settings,
-    teams: db.teams,
-    people: db.people,
+    settings: {
+      eventTitle: s.eventTitle,
+      publicUrl: s.publicUrl,
+      owner: s.owner,
+      smtp: {
+        host: s.smtp.host,
+        port: s.smtp.port,
+        secure: s.smtp.secure,
+        user: s.smtp.user,
+        fromEmail: s.smtp.fromEmail,
+        fromName: s.smtp.fromName,
+        passSet: !!s.smtp.pass,
+      },
+    },
+    teams: db.teams.map((t) => ({ id: t.id, name: t.name, members: members.get(t.id) || 0 })),
+    employees: db.employees.map((e) => ({
+      id: e.id,
+      name: e.name,
+      email: e.email,
+      teamId: e.teamId,
+      teamName: e.teamId ? teamName.get(e.teamId) || '' : '',
+      gender: e.gender,
+      voted: votedBy.get(e.id) || {},
+    })),
     competitions: db.competitions.map((c) => ({
       ...c,
       entryCount: entriesFor(c).length,
+      eligibleVoters: voters.filter((v) => entriesForVoter(c, v).length > 0).length,
+      votedCount: db.ballots.filter((b) => b.competitionId === c.id).length,
       results: computeResults(c),
-      voted: db.ballots.filter((b) => b.competitionId === c.id).map((b) => ({ teamId: b.teamId, at: b.at })),
     })),
     ballotCount: db.ballots.length,
+    voterCount: voters.length,
     adminPasswordIsDefault: !process.env.ADMIN_PASSWORD,
     storage: USE_REDIS ? 'upstash' : 'file',
     // Render's free plan wipes the local disk on every restart / sleep.
     storageIsTemporary: !USE_REDIS && !!process.env.RENDER,
+    smtpConfigured: smtpConfigured(),
   };
 }
 
-/** Keep ids stable for names that did not change, so existing votes still count. */
-function mergePeople(oldList, names, prefix) {
-  const pool = new Map();
-  for (const p of oldList) {
-    const k = p.name.toLowerCase();
-    if (!pool.has(k)) pool.set(k, []);
-    pool.get(k).push(p);
+/** Replace the employee list from an import, keeping ids stable so existing ballots survive. */
+function importEmployees(rows, syncTeams) {
+  const problems = [];
+  const parsed = [];
+  const seenEmail = new Map();
+  rows.forEach((r, i) => {
+    const n = i + 1;
+    const src = r && typeof r === 'object' ? r : {};
+    const name = cleanText(src.name, 80);
+    const email = normEmail(src.email);
+    const team = cleanText(src.team, 40);
+    const gender = normGender(src.gender);
+    if (!name) {
+      if (email || team) problems.push(`row ${n}: the name is missing`);
+      return; // fully empty rows are skipped silently
+    }
+    if (email && !validEmail(email)) return problems.push(`row ${n} (${name}): “${email}” is not a valid email`);
+    if (email) {
+      if (seenEmail.has(email)) return problems.push(`row ${n} (${name}): ${email} is repeated (row ${seenEmail.get(email)})`);
+      seenEmail.set(email, n);
+    }
+    parsed.push({ name, email, team, gender });
+  });
+  if (problems.length)
+    throw Object.assign(
+      httpError(400, `Please fix ${problems.length} problem${problems.length > 1 ? 's' : ''} in the import: ${problems.slice(0, 5).join('; ')}${problems.length > 5 ? '; …' : ''}`, 'IMPORT'),
+      { problems: problems.slice(0, 50) }
+    );
+  if (!parsed.length) throw httpError(400, 'No employees found in the import.', 'IMPORT');
+
+  // Teams
+  const importTeams = [];
+  const seenTeam = new Set();
+  for (const r of parsed) {
+    if (r.team && !seenTeam.has(r.team.toLowerCase())) {
+      seenTeam.add(r.team.toLowerCase());
+      importTeams.push(r.team);
+    }
   }
-  return names
-    .map((n) => cleanText(n, 60))
-    .filter(Boolean)
-    .map((name) => {
-      const queue = pool.get(name.toLowerCase());
-      if (queue && queue.length) return { id: queue.shift().id, name };
-      return { id: newId(prefix), name };
+  const existingByName = new Map(db.teams.map((t) => [t.name.toLowerCase(), t]));
+  let teams;
+  if (syncTeams && importTeams.length) {
+    teams = importTeams.map((name) => {
+      const ex = existingByName.get(name.toLowerCase());
+      return { id: ex ? ex.id : newId('t'), name };
     });
+  } else {
+    teams = db.teams.map((t) => ({ id: t.id, name: t.name }));
+    for (const name of importTeams)
+      if (!existingByName.has(name.toLowerCase())) {
+        const t = { id: newId('t'), name };
+        teams.push(t);
+        existingByName.set(name.toLowerCase(), t);
+      }
+  }
+  if (teams.length > 200) throw httpError(400, `The import has ${teams.length} teams — the limit is 200.`, 'IMPORT');
+  const teamIdByName = new Map(teams.map((t) => [t.name.toLowerCase(), t.id]));
+
+  // Employees (same email → same id; same name → same id when one side has no email)
+  const oldByEmail = new Map(db.employees.filter((e) => e.email).map((e) => [e.email, e]));
+  const oldByName = new Map();
+  for (const e of db.employees) {
+    const k = e.name.toLowerCase();
+    if (!oldByName.has(k)) oldByName.set(k, []);
+    oldByName.get(k).push(e);
+  }
+  const used = new Set();
+  const employees = parsed.map((r) => {
+    let prev = r.email ? oldByEmail.get(r.email) : null;
+    if (prev && used.has(prev.id)) prev = null;
+    if (!prev) prev = (oldByName.get(r.name.toLowerCase()) || []).find((e) => !used.has(e.id) && (!r.email || !e.email)) || null;
+    const id = prev ? prev.id : newId('e');
+    used.add(id);
+    return { id, name: r.name, email: r.email, teamId: r.team ? teamIdByName.get(r.team.toLowerCase()) || null : null, gender: r.gender };
+  });
+
+  db.teams = teams;
+  db.employees = employees;
+  db.ballots = db.ballots.filter((b) => used.has(b.voterId));
+  for (const email of [...otps.keys()]) if (!seenEmail.has(email)) otps.delete(email);
 }
 
 function csvCell(v) {
@@ -554,36 +847,88 @@ async function handleApi(req, res, url) {
   // ---------- public ----------
   if (m === 'GET' && p === '/api/state') return send(res, 200, publicState());
 
-  if (m === 'POST' && p === '/api/login') {
-    const body = await readJson(req);
-    const team = db.teams.find((t) => t.id === body.teamId);
-    if (!team) return send(res, 404, { error: 'That team no longer exists. Please pick your team again.', code: 'TEAM' });
-    const key = `${clientIp(req)}|${team.id}`;
-    if (isLocked(key)) return send(res, 429, { error: 'Too many wrong PINs. Please wait 5 minutes and try again.', code: 'LOCKED' });
-    if (db.settings.requirePin && !safeEqual(String(body.pin || '').trim(), team.pin)) {
-      recordFailure(key);
-      return send(res, 401, { error: 'Wrong PIN. Please check with your team lead or the organiser.', code: 'PIN' });
+  if (m === 'POST' && p === '/api/otp/request') {
+    const b = await readJson(req);
+    const email = normEmail(b.email);
+    if (!validEmail(email)) return send(res, 400, { code: 'EMAIL', error: 'Please enter a valid email address.' });
+    if (!smtpConfigured()) return send(res, 503, { code: 'EMAIL_OFF', error: 'Email login is not set up yet. Please ask the organiser.' });
+    const ipList = recent(ipSends, clientIp(req), OTP_IP_WINDOW_MS);
+    if (ipList.length >= OTP_IP_MAX) {
+      const retry = Math.max(1, Math.ceil((OTP_IP_WINDOW_MS - (Date.now() - ipList[0])) / 1000));
+      return send(res, 429, { code: 'WAIT', error: 'Too many login codes were requested from this network. Please try again in a few minutes.', retryInSec: retry });
     }
-    return send(res, 200, { token: teamToken(team), ...meFor(team) });
+    const emp = db.employees.find((e) => e.email === email);
+    if (!emp)
+      return send(res, 404, { code: 'NOT_FOUND', error: "This email isn't on the employee list. Please check it or ask the organiser." });
+    const sends = recent(otpSends, email, OTP_EMAIL_WINDOW_MS);
+    const last = sends[sends.length - 1];
+    if (last && Date.now() - last < OTP_RESEND_MS) {
+      const retry = Math.max(1, Math.ceil((OTP_RESEND_MS - (Date.now() - last)) / 1000));
+      return send(res, 429, { code: 'WAIT', error: `Please wait ${retry} seconds before asking for a new code.`, retryInSec: retry });
+    }
+    if (sends.length >= OTP_EMAIL_MAX) {
+      const retry = Math.max(1, Math.ceil((OTP_EMAIL_WINDOW_MS - (Date.now() - sends[0])) / 1000));
+      return send(res, 429, { code: 'WAIT', error: 'Too many codes were requested for this email. Please try again later.', retryInSec: retry });
+    }
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const stamp = Date.now();
+    sends.push(stamp);
+    ipList.push(stamp);
+    try {
+      await sendMail(otpEmail(emp, code));
+    } catch (err) {
+      sends.pop(); // a failed send should not block an immediate retry
+      console.error(`! Login code email to ${maskEmail(email)} failed: ${describeSmtpError(err)}`);
+      return send(res, 502, { code: 'SEND_FAILED', error: 'We could not send the email. Please try again in a minute.' });
+    }
+    otps.set(email, { hash: otpHash(email, code), exp: Date.now() + OTP_TTL_MS, tries: 0 }); // newest code replaces older ones
+    return send(res, 200, { ok: true, email, expiresInSec: OTP_TTL_MS / 1000, resendInSec: OTP_RESEND_MS / 1000 });
+  }
+
+  if (m === 'POST' && p === '/api/otp/verify') {
+    const b = await readJson(req);
+    const email = normEmail(b.email);
+    const code = String(b.code == null ? '' : b.code).replace(/\s+/g, '');
+    const entry = otps.get(email);
+    if (!entry || entry.exp < Date.now()) {
+      otps.delete(email);
+      return send(res, 410, { code: 'EXPIRED', error: 'This code has expired. Please request a new one.' });
+    }
+    if (!/^\d{6}$/.test(code) || !safeEqual(otpHash(email, code), entry.hash)) {
+      entry.tries++;
+      const left = Math.max(0, OTP_MAX_TRIES - entry.tries);
+      if (!left) otps.delete(email); // the next try gets 410 EXPIRED
+      return send(res, 401, {
+        code: 'OTP',
+        error: left ? 'That code is not right.' : 'That code is not right. Please request a new code.',
+        attemptsLeft: left,
+      });
+    }
+    otps.delete(email); // single use
+    const emp = db.employees.find((e) => e.email === email);
+    if (!emp)
+      return send(res, 404, { code: 'NOT_FOUND', error: "This email isn't on the employee list. Please check it or ask the organiser." });
+    console.log(`  → ${emp.name} logged in`);
+    return send(res, 200, { token: voterToken(emp), ...meFor(emp) });
   }
 
   if (m === 'GET' && p === '/api/me') {
-    const team = teamFromRequest(req);
-    if (!team) return send(res, 401, { error: 'Please choose your team again.', code: 'AUTH' });
-    return send(res, 200, meFor(team));
+    const voter = voterFromRequest(req);
+    if (!voter) return send(res, 401, { error: 'Please log in again.', code: 'AUTH' });
+    return send(res, 200, meFor(voter));
   }
 
   if (m === 'POST' && p === '/api/vote') {
-    const team = teamFromRequest(req);
-    if (!team) return send(res, 401, { error: 'Please choose your team again.', code: 'AUTH' });
+    const voter = voterFromRequest(req);
+    if (!voter) return send(res, 401, { error: 'Please log in again.', code: 'AUTH' });
     const body = await readJson(req);
     const comp = db.competitions.find((c) => c.id === body.competitionId);
     if (!comp) return send(res, 404, { error: 'Competition not found.', code: 'NOT_FOUND' });
     if (comp.status !== 'open') return send(res, 403, { error: 'Voting for this competition is closed.', code: 'CLOSED' });
-    if (db.ballots.some((b) => b.teamId === team.id && b.competitionId === comp.id))
-      return send(res, 409, { error: 'Your team has already voted in this competition.', code: 'ALREADY_VOTED' });
-    const entries = entriesForVoter(comp, team.id);
-    if (!entries.length) return send(res, 400, { error: 'There is nobody to score in this competition yet.', code: 'EMPTY' });
+    if (db.ballots.some((b) => b.voterId === voter.id && b.competitionId === comp.id))
+      return send(res, 409, { error: 'You have already voted in this competition.', code: 'ALREADY_VOTED' });
+    const entries = entriesForVoter(comp, voter);
+    if (!entries.length) return send(res, 400, { error: 'There is nobody for you to score in this competition yet.', code: 'EMPTY' });
     const scores = body.scores && typeof body.scores === 'object' ? body.scores : {};
     const clean = {};
     const missing = [];
@@ -594,14 +939,14 @@ async function handleApi(req, res, url) {
     }
     if (missing.length)
       return send(res, 400, { error: `Please score everyone first (${missing.length} left).`, code: 'INCOMPLETE', missing });
-    const ballot = { teamId: team.id, competitionId: comp.id, scores: clean, at: new Date().toISOString() };
+    const ballot = { voterId: voter.id, competitionId: comp.id, scores: clean, at: new Date().toISOString() };
     db.ballots.push(ballot);
     if (!(await saveDb())) {
       db.ballots = db.ballots.filter((x) => x !== ballot);
       return send(res, 503, { error: 'Your votes could not be saved. Please tap Submit again.', code: 'SAVE' });
     }
-    console.log(`  ✓ ${team.name} voted in ${comp.title}`);
-    return send(res, 200, { ok: true, ...meFor(team) });
+    console.log(`  ✓ ${voter.name} voted in ${comp.title}`);
+    return send(res, 200, { ok: true, ...meFor(voter) });
   }
 
   // ---------- organiser ----------
@@ -625,7 +970,6 @@ async function handleApi(req, res, url) {
       const b = await readJson(req);
       const s = db.settings;
       if (b.eventTitle != null) s.eventTitle = cleanText(b.eventTitle, 60) || s.eventTitle;
-      if (b.requirePin != null) s.requirePin = !!b.requirePin;
       if (b.publicUrl != null) {
         const u = cleanText(b.publicUrl, 200).replace(/\/+$/, '');
         s.publicUrl = /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : '';
@@ -639,12 +983,74 @@ async function handleApi(req, res, url) {
       return send(res, 200, adminData());
     }
 
+    if (m === 'POST' && p === '/api/admin/smtp') {
+      const b = await readJson(req);
+      const cur = db.settings.smtp;
+      const host = b.host != null ? cleanText(b.host, 200) : cur.host;
+      const fromEmail = b.fromEmail != null ? normEmail(b.fromEmail) : cur.fromEmail;
+      const port = b.port != null && b.port !== '' ? Number(b.port) : cur.port;
+      if (host && !/^[a-z0-9.-]+$/i.test(host)) return send(res, 400, { error: 'The SMTP host looks wrong (example: smtp-relay.brevo.com).' });
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return send(res, 400, { error: 'The SMTP port must be a number such as 2525, 587 or 465.' });
+      if (fromEmail && !validEmail(fromEmail)) return send(res, 400, { error: 'The “From” email is not a valid address.' });
+      db.settings.smtp = normaliseSmtp({
+        host,
+        port,
+        secure: b.secure != null ? !!b.secure : cur.secure,
+        user: b.user != null ? b.user : cur.user,
+        pass: typeof b.pass === 'string' && b.pass !== '' ? b.pass : cur.pass, // empty = keep the stored password
+        fromEmail,
+        fromName: b.fromName != null ? b.fromName : cur.fromName,
+      });
+      transport = null;
+      await mustSave();
+      return send(res, 200, adminData());
+    }
+
+    if (m === 'POST' && p === '/api/admin/smtp/test') {
+      const b = await readJson(req);
+      const to = normEmail(b.to);
+      if (!validEmail(to)) return send(res, 400, { error: 'Enter a valid email address to send the test to.' });
+      if (!smtpConfigured()) return send(res, 400, { error: 'Save the SMTP settings (host and “From” email) first.' });
+      const title = db.settings.eventTitle;
+      try {
+        await sendMail({
+          to,
+          subject: `Test email from ${title}`,
+          text: `It works! Login codes for ${title} will be sent from this address.\n\n— Team Mobilise 🪔`,
+          html: emailShell(
+            title,
+            `<tr><td align="center" style="padding-top:18px;font-size:18px;font-weight:bold">It works! ✅</td></tr>
+<tr><td align="center" style="padding-top:8px;font-size:14px;color:#e8e1cf">Login codes will be sent from this address.</td></tr>`
+          ),
+        });
+        return send(res, 200, { ok: true });
+      } catch (err) {
+        const reason = describeSmtpError(err);
+        console.error('! SMTP test failed:', reason);
+        return send(res, 502, { error: reason });
+      }
+    }
+
+    if (m === 'POST' && p === '/api/admin/employees') {
+      const b = await readJson(req);
+      if (!Array.isArray(b.rows)) return send(res, 400, { error: 'No rows were sent.' });
+      if (b.rows.length > 3000) return send(res, 400, { error: 'Too many rows — the limit is 3000.' });
+      try {
+        importEmployees(b.rows, !!b.syncTeams);
+      } catch (err) {
+        if (err.problems) return send(res, err.status || 400, { error: err.message, code: err.code, problems: err.problems });
+        throw err;
+      }
+      await mustSave();
+      console.log(`  ✓ Imported ${db.employees.length} employees, ${db.teams.length} teams`);
+      return send(res, 200, adminData());
+    }
+
     if (m === 'POST' && p === '/api/admin/teams') {
       const b = await readJson(req);
-      if (!Array.isArray(b.teams) || b.teams.length < 2 || b.teams.length > 60)
-        return send(res, 400, { error: 'Please keep between 2 and 60 teams.' });
+      if (!Array.isArray(b.teams) || b.teams.length < 2 || b.teams.length > 200)
+        return send(res, 400, { error: 'Please keep between 2 and 200 teams.' });
       const names = new Set();
-      const pins = new Set();
       const next = [];
       for (const t of b.teams) {
         const name = cleanText(t && t.name, 40);
@@ -652,28 +1058,11 @@ async function handleApi(req, res, url) {
         if (names.has(name.toLowerCase())) return send(res, 400, { error: `Two teams are called “${name}”.` });
         names.add(name.toLowerCase());
         const existing = t.id ? db.teams.find((x) => x.id === t.id) : null;
-        let pin = String((t && t.pin) || '').trim();
-        if (!validPin(pin)) pin = existing ? existing.pin : '';
-        if (pin && pins.has(pin)) return send(res, 400, { error: `PIN ${pin} is used twice. Each team needs its own PIN.` });
-        next.push({ id: existing ? existing.id : newId('t'), name, pin });
-        if (pin) pins.add(pin);
+        next.push({ id: existing ? existing.id : newId('t'), name });
       }
-      for (const t of next) if (!t.pin) pins.add((t.pin = randomPin(pins)));
       const keep = new Set(next.map((t) => t.id));
-      const removed = db.teams.filter((t) => !keep.has(t.id)).map((t) => t.id);
+      for (const e of db.employees) if (e.teamId && !keep.has(e.teamId)) e.teamId = null;
       db.teams = next;
-      if (removed.length) db.ballots = db.ballots.filter((x) => !removed.includes(x.teamId));
-      await mustSave();
-      return send(res, 200, adminData());
-    }
-
-    if (m === 'POST' && p === '/api/admin/people') {
-      const b = await readJson(req);
-      for (const k of ['male', 'female']) {
-        if (b[k] == null) continue;
-        if (!Array.isArray(b[k]) || b[k].length > 400) return send(res, 400, { error: 'Participant list is too long.' });
-        db.people[k] = mergePeople(db.people[k], b[k], k[0]);
-      }
       await mustSave();
       return send(res, 200, adminData());
     }
@@ -684,6 +1073,7 @@ async function handleApi(req, res, url) {
       if (!c) return send(res, 404, { error: 'Competition not found.' });
       if (b.status === 'open' || b.status === 'closed') c.status = b.status;
       if (b.published != null) c.published = !!b.published;
+      if (b.noOwnTeam != null) c.noOwnTeam = !!b.noOwnTeam;
       if (b.title != null) c.title = cleanText(b.title, 60) || c.title;
       if (b.subtitle != null) c.subtitle = cleanText(b.subtitle, 120);
       await mustSave();
@@ -694,8 +1084,9 @@ async function handleApi(req, res, url) {
       const b = await readJson(req);
       const before = db.ballots.length;
       if (b.all === true) db.ballots = [];
-      else if (b.competitionId && b.teamId)
-        db.ballots = db.ballots.filter((x) => !(x.competitionId === b.competitionId && x.teamId === b.teamId));
+      else if (b.voterId && b.competitionId)
+        db.ballots = db.ballots.filter((x) => !(x.competitionId === b.competitionId && x.voterId === b.voterId));
+      else if (b.voterId) db.ballots = db.ballots.filter((x) => x.voterId !== b.voterId);
       else if (b.competitionId) db.ballots = db.ballots.filter((x) => x.competitionId !== b.competitionId);
       else return send(res, 400, { error: 'Nothing to reset.' });
       await mustSave();
@@ -738,19 +1129,21 @@ async function handleApi(req, res, url) {
 
     if (m === 'GET' && p === '/api/admin/export') {
       const type = url.searchParams.get('type') === 'ballots' ? 'ballots' : 'results';
-      const teamName = new Map(db.teams.map((t) => [t.id, t.name]));
       let rows;
       if (type === 'results') {
         rows = [['Competition', 'Rank', 'Name', 'Average score', 'Total score', 'Votes received']];
         for (const c of db.competitions)
           for (const r of computeResults(c)) rows.push([c.title, r.votes ? r.rank : '', r.name, r.votes ? r.avg : '', r.total, r.votes]);
       } else {
-        rows = [['Competition', 'Voting team', 'Scored', 'Score', 'Submitted at']];
+        const byId = new Map(db.employees.map((e) => [e.id, e]));
+        rows = [['Competition', 'Voter', 'Voter email', 'Voter team', 'Scored', 'Score', 'Submitted at']];
         for (const c of db.competitions) {
           const names = new Map(entriesFor(c).map((e) => [e.id, e.name]));
-          for (const b of db.ballots.filter((x) => x.competitionId === c.id))
+          for (const b of db.ballots.filter((x) => x.competitionId === c.id)) {
+            const v = byId.get(b.voterId);
             for (const [id, s] of Object.entries(b.scores))
-              rows.push([c.title, teamName.get(b.teamId) || '(removed team)', names.get(id) || '(removed)', s, b.at]);
+              rows.push([c.title, v ? v.name : '(removed)', v ? v.email : '', v ? teamNameOf(v.teamId) : '', names.get(id) || '(removed)', s, b.at]);
+          }
         }
       }
       res.writeHead(200, {
@@ -777,7 +1170,7 @@ const server = http.createServer(async (req, res) => {
     return await serveStatic(req, res, url.pathname);
   } catch (err) {
     if (!err.expose) console.error(err);
-    if (!res.headersSent) send(res, err.status || 500, { error: err.expose ? err.message : 'Something went wrong. Please try again.' });
+    if (!res.headersSent) send(res, err.status || 500, { error: err.expose ? err.message : 'Something went wrong. Please try again.', code: err.code });
     else res.end();
   }
 });
@@ -795,16 +1188,18 @@ async function start() {
       .flat()
       .filter((i) => i && i.family === 'IPv4' && !i.internal)
       .map((i) => `http://${i.address}:${PORT}`);
+    const s = db.settings.smtp;
     console.log('\n  🪔  Mobilise Diwali Utsav — voting app is running');
     console.log(`      This computer : http://localhost:${PORT}`);
     for (const u of lan) console.log(`      Office network: ${u}`);
     console.log(`      Organiser     : http://localhost:${PORT}/admin`);
     console.log(`      Data stored in: ${USE_REDIS ? `Upstash Redis (key "${REDIS_KEY}")` : DB_FILE}`);
+    console.log(`      Teams         : ${db.teams.length}`);
+    console.log(`      Employees     : ${db.employees.length} (${db.employees.filter((e) => e.email).length} can log in with email)`);
+    console.log(`      Email (SMTP)  : ${smtpConfigured() ? `${s.host}:${s.port}${s.secure ? ' (SSL/TLS)' : ''} from ${s.fromEmail}` : 'not set up yet — add it in /admin → Setup'}`);
     if (!process.env.ADMIN_PASSWORD) console.log('      ! Admin password is the default "diwali2026" — set ADMIN_PASSWORD to change it.');
     if (process.env.RENDER && !USE_REDIS)
       console.log('      ! Render free disks are wiped on restart — set the UPSTASH_REDIS_REST_* variables to keep votes safe.');
-    console.log('\n      Team PINs:');
-    for (const t of db.teams) console.log(`        ${t.pin}  ${t.name}`);
     console.log('');
   });
 }

@@ -1,16 +1,26 @@
-/* admin.js — organiser console: live results, setup, teams & PINs, on-screen winner reveal. */
+/* admin.js — organiser console: live results + voters, setup (employees, email/SMTP, greeting),
+ * teams, and the on-screen winner reveal. Every employee logs in with an email OTP and votes. */
 (function () {
   'use strict';
   const { FX, Sound, Art, ICONS, LS, esc } = window.DW;
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
   const root = $('#admin');
-  const A = { token: LS.get('dw_admin'), data: null, tab: LS.get('dw_admin_tab') || 'live', expanded: new Set(), revealing: false, poll: null };
+  const A = {
+    token: LS.get('dw_admin'),
+    data: null,
+    tab: LS.get('dw_admin_tab') || 'live',
+    expanded: new Set(),
+    revealing: false,
+    poll: null,
+    voterQuery: '',
+  };
+  if (!['live', 'setup', 'teams'].includes(A.tab)) A.tab = 'live';
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const ordinal = (n) => ['', '1st', '2nd', '3rd'][n] || n + 'th';
   const fmtAvg = (n) => String(Math.round(n * 100) / 100);
-  const lines = (s) => String(s || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   const comp = (id) => A.data.competitions.find((c) => c.id === id);
+  const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
   function fmtTime(iso) {
     try {
       return new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -19,6 +29,15 @@
     }
   }
   const initials = (name) => String(name || '').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const employees = () => (A.data && A.data.employees) || [];
+  function debounce(fn, ms) {
+    let t;
+    return (...a) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...a), ms);
+    };
+  }
 
   /* ---------------- api ---------------- */
   async function api(path, opts = {}) {
@@ -69,7 +88,7 @@
     el.classList.toggle('is-error', !!isError);
     el.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), 3600);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3800);
   }
 
   function sheet(html, label = 'Dialog') {
@@ -85,6 +104,7 @@
       wrap.classList.remove('open');
       document.removeEventListener('keydown', onKey);
       setTimeout(() => wrap.remove(), 300);
+      if (typeof wrap.onClosed === 'function') wrap.onClosed();
     };
     const onKey = (e) => e.key === 'Escape' && close();
     document.addEventListener('keydown', onKey);
@@ -104,13 +124,16 @@
         title
       );
       let answered = false;
+      s.el.onClosed = () => {
+        if (!answered) {
+          answered = true;
+          resolve(false);
+        }
+      };
       s.el.querySelector('#cfOk').addEventListener('click', () => {
         answered = true;
         s.close();
         resolve(true);
-      });
-      s.el.addEventListener('click', (e) => {
-        if (e.target.closest('[data-close]') && !answered) resolve(false);
       });
     });
   }
@@ -153,8 +176,8 @@
   }
 
   const publicBase = () => (A.data.settings.publicUrl || location.origin).replace(/\/+$/, '');
-  const inviteUrl = (t) => `${publicBase()}/?team=${encodeURIComponent(t.id)}&pin=${encodeURIComponent(t.pin)}`;
-  const inviteText = (t) => `🪔 ${A.data.settings.eventTitle} · voting link for ${t.name}\n${inviteUrl(t)}\nPlease keep this link within your team.`;
+  const shareMessage = () =>
+    `🪔 ${A.data.settings.eventTitle}: voting is live!\n${publicBase()}/\nLog in with your office email, enter the code we email you, and score Best Desk & Best Dress. Happy Diwali! ✨`;
 
   /* ---------------- login / shell ---------------- */
   function loginView(msg) {
@@ -164,7 +187,7 @@
   <img class="brand-mark" src="assets/mobilise-logo-white.svg" alt="Mobilise" width="150" height="31">
   <div class="login-diya" aria-hidden="true">${Art.diya({ cls: 'md' })}</div>
   <h1 class="h1">Organiser console</h1>
-  <p class="muted">Manage teams, voting and the live winner reveal.</p>
+  <p class="muted">Manage employees, email login, voting and the live winner reveal.</p>
   <form id="loginForm" class="panel login-card" novalidate>
     <label class="field">Admin password<input id="pw" type="password" autocomplete="current-password" required autofocus></label>
     <p class="form-error" role="alert">${esc(msg || '')}</p>
@@ -211,7 +234,7 @@
   </div>
 </header>
 <nav class="tabs" role="tablist" aria-label="Sections">
-  ${[['live', 'Live results'], ['setup', 'Setup'], ['teams', 'Teams & PINs']]
+  ${[['live', 'Live results'], ['setup', 'Setup'], ['teams', 'Teams']]
     .map(([k, l]) => `<button role="tab" type="button" class="tab" data-tab="${k}">${l}</button>`)
     .join('')}
 </nav>
@@ -236,6 +259,10 @@
       banners.push(
         `<div class="banner danger">${ICONS.lock}<span><b>Votes are not being saved permanently.</b> This host wipes its disk on every restart. Add the <code>UPSTASH_REDIS_REST_URL</code> and <code>UPSTASH_REDIS_REST_TOKEN</code> settings (see README) before voting starts.</span></div>`
       );
+    if (!A.data.smtpConfigured)
+      banners.push(
+        `<div class="banner">${ICONS.lock}<span><b>Email login is not set up yet:</b> add the SMTP settings in <a href="#" data-goto="setup">Setup</a> so people can get their login codes.</span></div>`
+      );
     if (A.data.adminPasswordIsDefault)
       banners.push(
         `<div class="banner">${ICONS.lock}<span>You are using the default admin password. Restart the server with <code>ADMIN_PASSWORD</code> set before sharing the link.</span></div>`
@@ -247,61 +274,102 @@
     } else if (A.tab === 'teams') {
       body.innerHTML = teamsTab();
       bindTeams();
-    } else body.innerHTML = liveTab();
+    } else {
+      body.innerHTML = liveTab();
+      bindLive();
+    }
   }
 
   /* ---------------- live tab ---------------- */
-  function liveTab() {
+  function compPanel(c) {
     const d = A.data;
-    const teams = d.teams;
-    const panels = d.competitions
-      .map((c) => {
-        const voted = new Set(c.voted.map((v) => v.teamId));
-        const hasVotes = c.results.some((r) => r.votes > 0);
-        const open = A.expanded.has(c.id);
-        const rows = c.results
-          .map(
-            (r, i) => `<tr class="${i >= 5 && !open ? 'more' : ''}${r.votes && r.rank <= 3 ? ' top r' + r.rank : ''}">
+    const eligible = c.eligibleVoters != null ? c.eligibleVoters : d.voterCount || 0;
+    const votedCount = c.votedCount || 0;
+    const hasVotes = c.results.some((r) => r.votes > 0);
+    const open = A.expanded.has(c.id);
+    const rows = c.results
+      .map(
+        (r, i) => `<tr class="${i >= 5 && !open ? 'more' : ''}${r.votes && r.rank <= 3 ? ' top r' + r.rank : ''}">
   <td>${r.votes ? r.rank : '–'}</td><td>${esc(r.name)}</td><td class="num">${r.votes ? fmtAvg(r.avg) : '–'}</td><td class="num">${r.votes}</td></tr>`
-          )
-          .join('');
-        return `
+      )
+      .join('');
+    return `
 <article class="panel comp-panel k-${c.kind}" data-id="${esc(c.id)}">
   <header class="panel-head">
     <span class="pc-ic">${ICONS[c.kind]}</span>
-    <div class="ph-text"><h2>${esc(c.title)}</h2><p class="muted sm">${c.entryCount} ${c.kind === 'teams' ? 'teams' : 'participants'} · <b>${voted.size}/${teams.length}</b> teams voted</p></div>
+    <div class="ph-text"><h2>${esc(c.title)}</h2><p class="muted sm">${plural(c.entryCount, c.kind === 'teams' ? 'team' : 'participant', c.kind === 'teams' ? 'teams' : 'participants')} · <b>${votedCount}</b> of ${eligible} people voted</p></div>
     <div class="seg" role="group" aria-label="Voting status for ${esc(c.title)}">
       <button type="button" class="${c.status === 'open' ? 'on' : ''}" data-act="status" data-v="open">Open</button>
       <button type="button" class="${c.status === 'closed' ? 'on' : ''}" data-act="status" data-v="closed">Closed</button>
     </div>
   </header>
-  <div class="meter" aria-hidden="true"><span style="width:${teams.length ? (voted.size / teams.length) * 100 : 0}%"></span></div>
-  <div class="team-chips">${teams
-    .map((t) =>
-      voted.has(t.id)
-        ? `<button type="button" class="tchip done" data-act="ballot" data-team="${esc(t.id)}" title="Voted · click to manage">${ICONS.check}${esc(t.name)}</button>`
-        : `<span class="tchip">${esc(t.name)}</span>`
-    )
-    .join('')}</div>
+  <div class="meter" aria-hidden="true"><span style="width:${eligible ? Math.min(100, (votedCount / eligible) * 100) : 0}%"></span></div>
   <h3 class="sub-h">Live leaderboard <span class="faint">(average score)</span></h3>
   ${
     c.results.length
       ? `<table class="lb"><thead><tr><th>#</th><th>Name</th><th class="num">Avg</th><th class="num">Votes</th></tr></thead><tbody>${rows}</tbody></table>
          ${c.results.length > 5 ? `<button class="link-btn sm" type="button" data-act="more">${open ? 'Show top 5' : `Show all ${c.results.length}`}</button>` : ''}`
-      : `<p class="muted sm">No ${c.kind === 'teams' ? 'teams' : 'participants'} yet. Add them in Setup.</p>`
+      : `<p class="muted sm">No ${c.kind === 'teams' ? 'teams' : 'participants'} yet. ${c.kind === 'teams' ? 'Add them in the Teams tab.' : 'Import employees in Setup.'}</p>`
   }
+  <label class="switch own-team-rule" title="Applies to every voter who has a team"><input type="checkbox" data-act="own-team" ${c.noOwnTeam ? 'checked' : ''}><span class="sw" aria-hidden="true"></span>${
+    c.kind === 'teams' ? 'Members can’t vote for their own team’s desk' : 'Members can’t vote for people from their own team'
+  }</label>
   <footer class="panel-actions">
     <label class="switch"><input type="checkbox" data-act="publish" ${c.published ? 'checked' : ''}><span class="sw" aria-hidden="true"></span>Show winners in the app</label>
     <div class="row-btns">
       <button class="btn btn-gold sm" type="button" data-act="reveal" ${hasVotes ? '' : 'disabled'}>${ICONS.sparkle} Reveal on screen</button>
-      <button class="btn btn-danger sm" type="button" data-act="reset" ${c.voted.length ? '' : 'disabled'}>Reset votes</button>
+      <button class="btn btn-danger sm" type="button" data-act="reset" ${votedCount ? '' : 'disabled'}>Reset votes</button>
     </div>
   </footer>
 </article>`;
+  }
+
+  function votersPanel() {
+    const d = A.data;
+    const emps = employees();
+    const comps = d.competitions;
+    const voters = emps.filter((e) => e.email);
+    const allDone = voters.filter((e) => comps.every((c) => e.voted && e.voted[c.id])).length;
+    const allWord = comps.length === 3 ? 'all three' : `all ${comps.length}`;
+    const head = comps
+      .map((c) => `<th class="ck-col" title="${esc(c.title)}"><span class="pc-ic sm k-${c.kind}">${ICONS[c.kind]}</span><span class="sr-only">${esc(c.title)}</span></th>`)
+      .join('');
+    const rows = emps
+      .map((e) => {
+        const cells = comps
+          .map((c) => {
+            if (!e.email) return `<td class="ck na" title="No email: cannot log in">·</td>`;
+            const at = e.voted && e.voted[c.id];
+            return at
+              ? `<td class="ck"><button type="button" class="ck-btn" data-act="voter-ballot" data-voter="${esc(e.id)}" data-comp="${esc(c.id)}" title="Voted ${esc(fmtTime(at))} · click to manage" aria-label="${esc(e.name)} voted in ${esc(c.title)}">${ICONS.check}</button></td>`
+              : `<td class="ck no" title="Not voted yet">–</td>`;
+          })
+          .join('');
+        const search = `${e.name} ${e.email || ''} ${e.teamName || ''}`.toLowerCase();
+        const gender = e.gender === 'M' ? 'Male' : e.gender === 'F' ? 'Female' : '—';
+        return `<tr data-s="${esc(search)}"><td class="vt-name">${esc(e.name)}</td><td class="vt-email">${e.email ? esc(e.email) : '<span class="faint">no email</span>'}</td><td>${esc(e.teamName || '—')}</td><td>${gender}</td>${cells}</tr>`;
       })
       .join('');
     return `
-<div class="live-grid">${panels}</div>
+<section class="panel voters-panel">
+  <div class="vp-head">
+    <div><h2>Voters</h2><p class="muted sm"><b>${allDone}</b> of ${voters.length} ${voters.length === 1 ? 'person has' : 'people have'} voted in ${allWord}.</p></div>
+    ${emps.length ? `<label class="search vp-search">${ICONS.search}<input type="search" id="voterSearch" placeholder="Search name, email or team" value="${esc(A.voterQuery)}" autocomplete="off" aria-label="Search voters"></label>` : ''}
+  </div>
+  ${
+    emps.length
+      ? `<div class="table-scroll"><table class="lb vt"><thead><tr><th>Name</th><th>Email</th><th>Team</th><th>Gender</th>${head}</tr></thead><tbody id="voterRows">${rows}</tbody></table></div>
+         <p class="no-match" id="voterNoMatch" hidden>No one matches your search.</p>`
+      : `<p class="muted sm">No employees yet. Import them in <a href="#" data-goto="setup">Setup → Employees</a>.</p>`
+  }
+</section>`;
+  }
+
+  function liveTab() {
+    const d = A.data;
+    return `
+<div class="live-grid">${d.competitions.map(compPanel).join('')}</div>
+${votersPanel()}
 <div class="panel export-panel">
   <div><h2>Exports</h2><p class="muted sm">${d.ballotCount} ballots so far. Download a backup any time.</p></div>
   <div class="row-btns">
@@ -309,6 +377,29 @@
     <button class="btn btn-ghost sm" type="button" data-act="export" data-type="ballots">${ICONS.download} Every ballot (CSV)</button>
   </div>
 </div>`;
+  }
+
+  function filterVoters() {
+    const q = (A.voterQuery || '').trim().toLowerCase();
+    const rows = $$('#voterRows tr');
+    let shown = 0;
+    rows.forEach((r) => {
+      const ok = !q || r.dataset.s.includes(q);
+      r.hidden = !ok;
+      if (ok) shown++;
+    });
+    const nm = $('#voterNoMatch');
+    if (nm) nm.hidden = shown > 0 || !rows.length;
+  }
+
+  function bindLive() {
+    const input = $('#voterSearch');
+    if (!input) return;
+    filterVoters();
+    input.addEventListener('input', () => {
+      A.voterQuery = input.value;
+      filterVoters();
+    });
   }
 
   async function setComp(id, patch) {
@@ -330,18 +421,211 @@
     }, 1500);
   }
 
+  /* ---------------- employees import (paste from Excel / CSV) ---------------- */
+  function detectDelimiter(line) {
+    if (line.includes('\t')) return '\t';
+    const semis = line.split(';').length;
+    const commas = line.split(',').length;
+    return semis > commas ? ';' : ',';
+  }
+
+  function splitRow(line, d) {
+    const out = [];
+    let cur = '';
+    let quoted = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (quoted) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else quoted = false;
+        } else cur += ch;
+      } else if (ch === '"' && cur.trim() === '') {
+        quoted = true;
+        cur = '';
+      } else if (ch === d) {
+        out.push(cur.trim());
+        cur = '';
+      } else cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  }
+
+  const MALE_RE = /^(m|male|man|men|boy|gents?|mr\.?)$/i;
+  const FEMALE_RE = /^(f|female|woman|women|girl|lady|ladies|mrs\.?|ms\.?|miss)$/i;
+  const normGender = (g) => (MALE_RE.test(String(g || '').trim()) ? 'M' : FEMALE_RE.test(String(g || '').trim()) ? 'F' : '');
+
+  /** Without a header row: the email column is the one full of "@", gender the one full of M/F words. */
+  function guessColumns(cells) {
+    const sample = cells.slice(0, 40);
+    const cols = Math.max(...sample.map((r) => r.length));
+    const score = (test) => Array.from({ length: cols }, (_, i) => sample.filter((r) => test(r[i] || '')).length);
+    const at = score((v) => v.includes('@'));
+    const gen = score((v) => MALE_RE.test(v.trim()) || FEMALE_RE.test(v.trim()));
+    const best = (arr, skip) => {
+      let idx = -1;
+      arr.forEach((v, i) => {
+        if (v > 0 && !skip.includes(i) && (idx < 0 || v > arr[idx])) idx = i;
+      });
+      return idx;
+    };
+    const email = best(at, []);
+    const gender = best(gen, [email]);
+    const rest = Array.from({ length: cols }, (_, i) => i).filter((i) => i !== email && i !== gender);
+    return { name: rest.length ? rest[0] : -1, email, team: rest.length > 1 ? rest[1] : -1, gender };
+  }
+
+  function parseEmployees(text) {
+    const res = { rows: [], problems: [], notes: [], teams: new Set(), withEmail: 0, male: 0, female: 0, header: false };
+    const all = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    const lines = [];
+    all.forEach((l, i) => {
+      if (l.trim()) lines.push({ text: l, no: i + 1 });
+    });
+    if (!lines.length) return res;
+    const delim = detectDelimiter(lines[0].text);
+    const cells = lines.map((l) => splitRow(l.text, delim));
+    const h = cells[0].map((c) => c.toLowerCase());
+    const isHeader = h.some((c) => /e-?mail/.test(c)) || h.some((c) => /^(full\s*)?name$|^employee(\s*name)?$/.test(c));
+    let idx;
+    let start = 0;
+    if (isHeader) {
+      const find = (test) => h.findIndex(test);
+      let name = find((c) => /name/.test(c) && !/team|dept|department|group|mail|user/.test(c));
+      if (name < 0) name = find((c) => /employee|person|staff/.test(c) && !/mail|id|code|no\b/.test(c));
+      idx = {
+        name,
+        email: find((c) => /mail/.test(c)),
+        team: find((c) => /team|dept|department|group/.test(c) && !/mail/.test(c)),
+        gender: find((c) => /gender|sex/.test(c)),
+      };
+      start = 1;
+      res.header = true;
+    } else idx = guessColumns(cells);
+
+    const cell = (row, i) => (i >= 0 && i < row.length ? row[i].trim() : '');
+    const seenEmail = new Map();
+    let noEmail = 0;
+    let noGender = 0;
+    const oddGender = new Set();
+    for (let r = start; r < cells.length; r++) {
+      const row = cells[r];
+      const no = lines[r].no;
+      const name = cell(row, idx.name).replace(/\s+/g, ' ');
+      const email = cell(row, idx.email).toLowerCase();
+      const team = cell(row, idx.team).replace(/\s+/g, ' ');
+      const genderRaw = cell(row, idx.gender);
+      if (!name && !email && !team && !genderRaw) continue;
+      if (!name) {
+        res.problems.push(`Row ${no}: the name is missing.`);
+        continue;
+      }
+      if (email && !EMAIL_RE.test(email)) {
+        res.problems.push(`Row ${no}: “${email}” is not a valid email.`);
+        continue;
+      }
+      if (email && seenEmail.has(email)) {
+        res.problems.push(`Row ${no}: ${email} is repeated (also on row ${seenEmail.get(email)}).`);
+        continue;
+      }
+      if (email) seenEmail.set(email, no);
+      const gender = normGender(genderRaw);
+      if (genderRaw && !gender) oddGender.add(genderRaw);
+      if (!email) noEmail++;
+      else res.withEmail++;
+      if (gender === 'M') res.male++;
+      else if (gender === 'F') res.female++;
+      else noGender++;
+      if (team) res.teams.add(team.toLowerCase());
+      res.rows.push({ name, email, team, gender });
+    }
+    if (noEmail) res.notes.push(`${plural(noEmail, 'person has', 'people have')} no email. They can be scored but cannot log in to vote.`);
+    if (noGender) res.notes.push(`${plural(noGender, 'person has', 'people have')} no gender (M/F), so they won't appear in Best Dress.`);
+    if (oddGender.size) res.notes.push(`Gender values not understood: ${[...oddGender].slice(0, 5).join(', ')}. Use M or F.`);
+    if (res.rows.length && !res.withEmail) res.notes.push('No email column was found. Add an Email column (or a header row: Name, Email, Team, Gender).');
+    return res;
+  }
+
+  function employeesToText() {
+    const emps = employees();
+    if (!emps.length) return '';
+    const clean = (v) => String(v || '').replace(/\t/g, ' ');
+    return ['Name\tEmail\tTeam\tGender', ...emps.map((e) => [e.name, e.email, e.teamName, e.gender].map(clean).join('\t'))].join('\n');
+  }
+
   /* ---------------- setup tab ---------------- */
   function setupTab() {
     const d = A.data;
     const s = d.settings;
+    const smtp = s.smtp || {};
+    const emps = employees();
+    const withEmail = emps.filter((e) => e.email).length;
+    const male = emps.filter((e) => e.gender === 'M').length;
+    const female = emps.filter((e) => e.gender === 'F').length;
+    const port = smtp.port || 587;
+    const ssl = !!smtp.secure;
     return `
 <div class="setup-grid">
+  <form class="panel span-2" id="empForm" novalidate>
+    <h2>Employees <span class="faint sm">(voters and Best Dress participants)</span></h2>
+    <p class="muted sm">Paste straight from Excel or Google Sheets, or from a CSV file. Use the columns <b>Name, Email, Team, Gender</b>; a header row is optional.<br>
+      Everyone with an email can log in and vote. Gender (M/F) puts them in Best Dress (Male) or (Female). Team is used for Best Desk, and nobody scores their own team.</p>
+    <p class="emp-current">${
+      emps.length
+        ? `Saved now: <b>${emps.length}</b> employees · ${withEmail} with email · ${male} male · ${female} female · ${plural(d.teams.length, 'team', 'teams')}. The box below shows this list. Edit it, or paste a new one.`
+        : 'No employees saved yet.'
+    }</p>
+    <label class="field"><span class="field-label">List</span>
+      <textarea name="emp" class="emp-textarea" rows="12" spellcheck="false" placeholder="Name&#9;Email&#9;Team&#9;Gender&#10;Rahul Verma&#9;rahul.verma@mobilise.co.in&#9;OpsSuite&#9;M&#10;Priya Sharma&#9;priya.sharma@mobilise.co.in&#9;HRevO&#9;F">${esc(employeesToText())}</textarea>
+    </label>
+    <div class="row-btns">
+      <label class="btn btn-ghost sm file-btn">${ICONS.plus} Load a CSV file<input type="file" id="empFile" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden></label>
+    </div>
+    <div class="import-stats" id="empStats"></div>
+    <ul class="problems" id="empProblems" hidden></ul>
+    <ul class="problems notes" id="empNotes" hidden></ul>
+    <label class="switch"><input type="checkbox" name="syncTeams"><span class="sw" aria-hidden="true"></span>Replace the Best Desk team list with the teams from this import</label>
+    <p class="form-note">Saving replaces the whole employee list. People keep their votes as long as their email stays the same; people removed from the list lose their votes.</p>
+    <button class="btn btn-gold sm" type="submit" id="empSave">Save employees</button>
+  </form>
+
+  <form class="panel span-2" id="smtpForm" novalidate autocomplete="off">
+    <h2>Email for login codes (SMTP)</h2>
+    <p class="muted sm">Everyone logs in with a 6-digit code sent to their office email. Add the details of the mailbox or email service that sends those codes.</p>
+    <p class="note">Render's free plan blocks ports 25, 465 and 587. Use an email provider that offers port 2525 (Brevo, SendGrid, Mailgun, SMTP2GO), or upgrade the Render service to a paid instance.<br>
+      Example for Brevo: host <code>smtp-relay.brevo.com</code> · port <code>2525</code> · STARTTLS · username = your Brevo SMTP login · password = an SMTP key. The "From email" must be a sender you verified with the provider.</p>
+    <div class="smtp-grid">
+      <label class="field">SMTP host<input name="host" value="${esc(smtp.host || '')}" placeholder="smtp-relay.brevo.com" autocomplete="off" spellcheck="false"></label>
+      <label class="field">Port<input name="port" type="number" min="1" max="65535" value="${esc(port)}" inputmode="numeric"></label>
+      <label class="field">Security<select name="security">
+        <option value="starttls" ${ssl ? '' : 'selected'}>STARTTLS: port 587 or 2525</option>
+        <option value="ssl" ${ssl ? 'selected' : ''}>SSL/TLS: port 465</option>
+      </select></label>
+      <label class="field">Username<input name="user" value="${esc(smtp.user || '')}" autocomplete="off" spellcheck="false"></label>
+      <label class="field">Password<input name="pass" type="password" value="" placeholder="${smtp.passSet ? '•••••• saved' : ''}" autocomplete="new-password"><small>${smtp.passSet ? 'Leave empty to keep the saved password.' : ''}</small></label>
+      <span class="smtp-spacer" aria-hidden="true"></span>
+      <label class="field">From email<input name="fromEmail" type="email" value="${esc(smtp.fromEmail || '')}" placeholder="diwali@mobilise.co.in" autocomplete="off" spellcheck="false"></label>
+      <label class="field">From name<input name="fromName" value="${esc(smtp.fromName || 'Mobilise Diwali Utsav')}" maxlength="60"></label>
+    </div>
+    <button class="btn btn-gold sm" type="submit">Save email settings</button>
+    <div class="smtp-test-box">
+      <label class="field-label" for="smtpTestTo">Send a test email to</label>
+      <div class="smtp-test">
+        <input class="inp" id="smtpTestTo" type="email" placeholder="you@mobilise.co.in" autocomplete="email">
+        <button class="btn btn-ghost sm" type="button" id="smtpTestBtn">Send test email</button>
+      </div>
+      <p class="smtp-result" id="smtpTestResult" role="status"></p>
+    </div>
+  </form>
+
   <form class="panel" id="eventForm" novalidate>
     <h2>Event</h2>
     <label class="field">Event title<input name="eventTitle" value="${esc(s.eventTitle)}" maxlength="60"></label>
-    <label class="field">Public link of this app<input name="publicUrl" value="${esc(s.publicUrl)}" placeholder="${esc(location.origin)}" inputmode="url">
-      <small>Used to build team invite links. Leave empty to use ${esc(location.origin)}</small></label>
-    <label class="switch"><input type="checkbox" name="requirePin" ${s.requirePin ? 'checked' : ''}><span class="sw" aria-hidden="true"></span>Teams need their PIN to vote (recommended)</label>
+    <label class="field">Public link of this app<input name="publicUrl" value="${esc(s.publicUrl || '')}" placeholder="${esc(location.origin)}" inputmode="url">
+      <small>Used for the share link. Leave empty to use ${esc(location.origin)}</small></label>
     <button class="btn btn-gold sm" type="submit">Save event</button>
   </form>
 
@@ -364,17 +648,6 @@
     </div>
   </form>
 
-  <form class="panel span-2" id="peopleForm" novalidate>
-    <h2>Best Dress participants</h2>
-    <p class="muted sm">One name per line. Use full names so nobody gets confused (for example “Rahul Verma” and “Rahul Singh”).</p>
-    <div class="two-col">
-      <label class="field"><span class="field-label">${ICONS.male} Male <span class="count" id="maleCount"></span></span><textarea name="male" rows="12" spellcheck="false">${esc(d.people.male.map((p) => p.name).join('\n'))}</textarea></label>
-      <label class="field"><span class="field-label">${ICONS.female} Female <span class="count" id="femaleCount"></span></span><textarea name="female" rows="12" spellcheck="false">${esc(d.people.female.map((p) => p.name).join('\n'))}</textarea></label>
-    </div>
-    <p class="form-note" id="peopleNote"></p>
-    <button class="btn btn-gold sm" type="submit">Save participants</button>
-  </form>
-
   <form class="panel span-2" id="compForm" novalidate>
     <h2>Competition names</h2>
     ${d.competitions
@@ -388,21 +661,171 @@
   </form>
 
   <div class="panel span-2 danger-zone">
-    <div><h2>Danger zone</h2><p class="muted sm">Delete every ballot in all three competitions. Teams, PINs and names stay as they are.</p></div>
+    <div><h2>Danger zone</h2><p class="muted sm">Delete every ballot in all three competitions. Employees, teams and settings stay as they are.</p></div>
     <button class="btn btn-danger sm" type="button" data-act="reset-all" ${d.ballotCount ? '' : 'disabled'}>Reset all votes</button>
   </div>
 </div>`;
   }
 
   function bindSetup() {
+    /* --- employees --- */
+    const ef = $('#empForm');
+    const ta = ef.elements.emp;
+    const syncBox = ef.elements.syncTeams;
+    let syncTouched = false;
+    let parsed = parseEmployees(ta.value);
+    syncBox.addEventListener('change', () => (syncTouched = true));
+    const renderPreview = () => {
+      const p = parsed;
+      $('#empStats').innerHTML = p.rows.length
+        ? [`<b>${p.rows.length}</b> people`, `<b>${p.withEmail}</b> with email`, `<b>${p.male}</b> male`, `<b>${p.female}</b> female`, `<b>${p.teams.size}</b> teams`]
+            .map((x) => `<span class="stat">${x}</span>`)
+            .join('')
+        : `<span class="faint sm">Paste the list above to see a preview.</span>`;
+      const probs = $('#empProblems');
+      probs.hidden = !p.problems.length;
+      probs.innerHTML =
+        p.problems
+          .slice(0, 8)
+          .map((x) => `<li>${esc(x)}</li>`)
+          .join('') + (p.problems.length > 8 ? `<li>…and ${p.problems.length - 8} more.</li>` : '');
+      const notes = $('#empNotes');
+      notes.hidden = !p.notes.length;
+      notes.innerHTML = p.notes.map((x) => `<li>${esc(x)}</li>`).join('');
+      if (!syncTouched) syncBox.checked = p.teams.size > 0;
+      $('#empSave').disabled = !p.rows.length || p.problems.length > 0;
+    };
+    const refresh = () => {
+      parsed = parseEmployees(ta.value);
+      renderPreview();
+    };
+    ta.addEventListener('input', debounce(refresh, 150));
+    renderPreview();
+    $('#empFile').addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        ta.value = String(reader.result || '').replace(/^﻿/, '');
+        refresh();
+        toast(`Loaded ${file.name}. Check the preview, then save.`);
+      };
+      reader.onerror = () => toast('Could not read that file.', true);
+      reader.readAsText(file);
+      e.target.value = '';
+    });
+    ef.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      refresh();
+      if (!parsed.rows.length) return toast('Paste the employee list first.', true);
+      if (parsed.problems.length) return toast('Please fix the problems listed above first.', true);
+      const keys = new Set(parsed.rows.map((r) => (r.email ? 'e:' + r.email : 'n:' + r.name.toLowerCase())));
+      const lostVoters = employees().filter(
+        (x) => !keys.has(x.email ? 'e:' + x.email.toLowerCase() : 'n:' + x.name.toLowerCase()) && x.voted && Object.keys(x.voted).length
+      );
+      if (lostVoters.length) {
+        const ok = await confirmSheet({
+          title: 'Remove people who already voted?',
+          body: `${esc(lostVoters.slice(0, 6).map((x) => x.name).join(', '))}${lostVoters.length > 6 ? ` and ${lostVoters.length - 6} more` : ''} ${lostVoters.length === 1 ? 'is' : 'are'} not in the new list. Their votes will be deleted.`,
+          cta: 'Save and delete their votes',
+        });
+        if (!ok) return;
+      }
+      busy($('#empSave'), async () => {
+        A.data = await api('/api/admin/employees', { method: 'POST', body: { rows: parsed.rows, syncTeams: !!syncBox.checked } });
+        toast(`Saved ${employees().length} employees`);
+        renderTab();
+      });
+    });
+
+    /* --- SMTP --- */
+    const sf = $('#smtpForm');
+    let smtpDirty = false;
+    sf.addEventListener('input', () => (smtpDirty = true));
+    sf.elements.security.addEventListener('change', () => {
+      const p = Number(sf.elements.port.value);
+      if (sf.elements.security.value === 'ssl' && (p === 587 || p === 2525 || p === 25 || !p)) sf.elements.port.value = 465;
+      if (sf.elements.security.value === 'starttls' && (p === 465 || !p)) sf.elements.port.value = 587;
+    });
+    const smtpBody = () => ({
+      host: sf.elements.host.value.trim(),
+      port: Number(sf.elements.port.value) || 587,
+      secure: sf.elements.security.value === 'ssl',
+      user: sf.elements.user.value.trim(),
+      pass: sf.elements.pass.value,
+      fromEmail: sf.elements.fromEmail.value.trim(),
+      fromName: sf.elements.fromName.value.trim(),
+    });
+    const saveSmtp = async () => {
+      const b = smtpBody();
+      if (!b.host) throw new Error('Please enter the SMTP host.');
+      if (!EMAIL_RE.test(b.fromEmail)) throw new Error('Please enter a valid "From email".');
+      A.data = await api('/api/admin/smtp', { method: 'POST', body: b });
+      smtpDirty = false;
+    };
+    sf.addEventListener('submit', (e) => {
+      e.preventDefault();
+      busy(sf.querySelector('[type=submit]'), async () => {
+        await saveSmtp();
+        toast('Email settings saved');
+        renderTab();
+      });
+    });
+    const testBtn = $('#smtpTestBtn');
+    const testTo = $('#smtpTestTo');
+    const out = $('#smtpTestResult');
+    testTo.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        testBtn.click();
+      }
+    });
+    testBtn.addEventListener('click', () => {
+      const to = testTo.value.trim();
+      if (!EMAIL_RE.test(to)) {
+        out.className = 'smtp-result err';
+        out.textContent = 'Enter the email address to send the test to.';
+        return;
+      }
+      busy(testBtn, async () => {
+        const savingFirst = smtpDirty;
+        let cls;
+        let text;
+        out.className = 'smtp-result';
+        out.textContent = savingFirst ? 'Saving the settings, then sending…' : 'Sending… (this can take up to 30 seconds)';
+        try {
+          if (savingFirst) await saveSmtp();
+          await api('/api/admin/smtp/test', { method: 'POST', body: { to } });
+          cls = 'smtp-result ok';
+          text = `✓ Test email sent to ${to}. Check the inbox, and the spam folder too.`;
+          toast('Test email sent');
+        } catch (ex) {
+          cls = 'smtp-result err';
+          text = '✗ ' + ex.message;
+          toast('Test email failed', true);
+        }
+        if (savingFirst && !smtpDirty) {
+          // settings were saved: re-render so the banners and the "saved" password hint update
+          const y = window.scrollY;
+          renderTab();
+          window.scrollTo(0, y);
+        }
+        const o = $('#smtpTestResult');
+        if (o) {
+          o.className = cls;
+          o.textContent = text;
+        }
+        const t = $('#smtpTestTo');
+        if (t) t.value = to;
+      });
+    });
+
+    /* --- event / owner / photo / names --- */
     $('#eventForm').addEventListener('submit', (e) => {
       e.preventDefault();
       const f = e.target;
       busy(f.querySelector('[type=submit]'), async () => {
-        A.data = await api('/api/admin/settings', {
-          method: 'POST',
-          body: { eventTitle: f.eventTitle.value, publicUrl: f.publicUrl.value, requirePin: f.requirePin.checked },
-        });
+        A.data = await api('/api/admin/settings', { method: 'POST', body: { eventTitle: f.eventTitle.value, publicUrl: f.publicUrl.value } });
         toast('Event settings saved');
         renderTab();
       });
@@ -414,7 +837,7 @@
       busy(f.querySelector('[type=submit]'), async () => {
         A.data = await api('/api/admin/settings', {
           method: 'POST',
-          body: { owner: { name: f.name.value, title: f.title.value, message: f.message.value } },
+          body: { owner: { name: f.elements.name.value, title: f.elements.title.value, message: f.elements.message.value } },
         });
         toast('Greeting saved');
         renderTab();
@@ -424,34 +847,6 @@
     $('#photoInput').addEventListener('change', (e) => {
       const file = e.target.files && e.target.files[0];
       if (file) busy(null, () => uploadPhoto(file));
-    });
-
-    const pf = $('#peopleForm');
-    const check = () => {
-      const male = lines(pf.male.value);
-      const female = lines(pf.female.value);
-      $('#maleCount').textContent = `(${male.length})`;
-      $('#femaleCount').textContent = `(${female.length})`;
-      const seen = new Map();
-      [...male, ...female].forEach((n) => seen.set(n.toLowerCase(), (seen.get(n.toLowerCase()) || 0) + 1));
-      const dupes = [...seen.entries()].filter(([, k]) => k > 1).map(([n, k]) => `${n} ×${k}`);
-      const hasVotes = A.data.competitions.some((c) => c.kind !== 'teams' && c.voted.length);
-      $('#peopleNote').innerHTML = [
-        dupes.length ? `<span class="warn-text">Repeated names: ${esc(dupes.join(', '))}. Add surnames so teams can tell them apart.</span>` : '',
-        hasVotes ? 'Votes already cast are kept for names you don’t change. Renamed or removed names lose their scores.' : '',
-      ]
-        .filter(Boolean)
-        .join('<br>');
-    };
-    pf.addEventListener('input', check);
-    check();
-    pf.addEventListener('submit', (e) => {
-      e.preventDefault();
-      busy(pf.querySelector('[type=submit]'), async () => {
-        A.data = await api('/api/admin/people', { method: 'POST', body: { male: lines(pf.male.value), female: lines(pf.female.value) } });
-        toast('Participants saved');
-        renderTab();
-      });
     });
 
     const cf = $('#compForm');
@@ -496,11 +891,11 @@
 
   /* ---------------- teams tab ---------------- */
   function teamRow(t, i) {
-    return `<div class="team-row" data-team-id="${esc(t.id || '')}">
+    const members = t.members || 0;
+    return `<div class="team-row v2" data-team-id="${esc(t.id || '')}">
   <span class="tr-no">${i + 1}</span>
   <input class="tr-name" value="${esc(t.name)}" maxlength="40" aria-label="Team name" placeholder="Team name">
-  <input class="tr-pin" value="${esc(t.pin || '')}" maxlength="6" inputmode="numeric" aria-label="PIN" placeholder="auto">
-  <button class="icon-btn sm" type="button" data-act="copy-invite" title="Copy invite link" aria-label="Copy invite link" ${t.id ? '' : 'disabled'}>${ICONS.copy}</button>
+  <span class="tr-members" title="People in this team (from the employee list)">${t.id ? plural(members, 'person', 'people') : 'new'}</span>
   <button class="icon-btn sm danger" type="button" data-act="remove-team" title="Remove team" aria-label="Remove team">${ICONS.trash}</button>
 </div>`;
   }
@@ -510,18 +905,20 @@
     const general = publicBase() + '/';
     return `
 <div class="panel">
-  <h2>Teams &amp; PINs</h2>
-  <p class="muted sm">Send each team lead their <b>own</b> invite link on WhatsApp. It opens the app already logged in as that team. Keep PINs private: anyone with a team’s PIN can vote for that team.</p>
-  <div class="share-row"><span class="faint">Link for everyone</span><code>${esc(general)}</code><button class="btn btn-ghost sm" type="button" data-act="copy" data-text="${esc(general)}">${ICONS.copy} Copy</button></div>
+  <h2>Teams <span class="faint sm">(Best Desk entries)</span></h2>
+  <p class="muted sm">Everyone scores every team's desk except their own team's. Who belongs to which team comes from the employee list in Setup.</p>
+  <div class="share-row"><span class="faint">Voting link for everyone</span><code>${esc(general)}</code>
+    <button class="btn btn-ghost sm" type="button" data-act="copy" data-text="${esc(general)}">${ICONS.copy} Copy link</button>
+    <button class="btn btn-ghost sm" type="button" data-act="copy" data-text="${esc(shareMessage())}">${ICONS.copy} Copy WhatsApp message</button>
+  </div>
   <form id="teamsForm" novalidate>
-    <div class="team-rows-head"><span>#</span><span>Team name</span><span>PIN</span><span></span><span></span></div>
+    <div class="team-rows-head v2"><span>#</span><span>Team name</span><span>Members</span><span></span></div>
     <div class="team-rows" id="teamRows">${d.teams.map(teamRow).join('')}</div>
     <div class="row-btns">
       <button class="btn btn-ghost sm" type="button" data-act="add-team">${ICONS.plus} Add team</button>
       <button class="btn btn-gold sm" type="submit">Save teams</button>
-      <button class="btn btn-ghost sm" type="button" data-act="copy-all">${ICONS.copy} Copy all invites (for you only)</button>
     </div>
-    <p class="form-note">Leave a PIN empty to generate one. Removing a team also deletes the votes it cast.</p>
+    <p class="form-note">Renaming a team keeps its members and scores. Removing a team drops the scores it received, and its members are left without a team.</p>
   </form>
 </div>`;
   }
@@ -531,14 +928,16 @@
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const rows = $$('.team-row', form);
-      const teams = rows.map((r) => ({ id: r.dataset.teamId || undefined, name: $('.tr-name', r).value, pin: $('.tr-pin', r).value.trim() }));
+      const teams = rows.map((r) => ({ id: r.dataset.teamId || undefined, name: $('.tr-name', r).value.trim() }));
+      if (teams.some((t) => !t.name)) return toast('Every team needs a name.', true);
       const keep = new Set(teams.map((t) => t.id).filter(Boolean));
       const lost = A.data.teams.filter((t) => !keep.has(t.id));
-      const lostVotes = A.data.competitions.reduce((n, c) => n + c.voted.filter((v) => lost.some((t) => t.id === v.teamId)).length, 0);
-      if (lostVotes) {
+      const lostMembers = lost.reduce((n, t) => n + (t.members || 0), 0);
+      const desk = A.data.competitions.find((c) => c.kind === 'teams');
+      if (lost.length && (lostMembers || (desk && desk.votedCount))) {
         const ok = await confirmSheet({
-          title: 'Remove teams with votes?',
-          body: `${esc(lost.map((t) => t.name).join(', '))} already voted. Removing ${lost.length > 1 ? 'them' : 'it'} deletes ${lostVotes} ballot${lostVotes > 1 ? 's' : ''}.`,
+          title: lost.length === 1 ? `Remove ${lost[0].name}?` : `Remove ${lost.length} teams?`,
+          body: `${esc(lost.map((t) => t.name).join(', '))} will be removed.${lostMembers ? ` ${plural(lostMembers, 'person', 'people')} will be left without a team.` : ''} Scores already given to ${lost.length > 1 ? 'these teams' : 'this team'} are dropped.`,
           cta: 'Remove and save',
         });
         if (!ok) return;
@@ -549,9 +948,6 @@
         renderTab();
       });
     });
-    form.addEventListener('input', (e) => {
-      if (e.target.classList.contains('tr-pin')) e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6);
-    });
   }
 
   /* ---------------- events ---------------- */
@@ -561,6 +957,15 @@
       A.tab = tab.dataset.tab;
       LS.set('dw_admin_tab', A.tab);
       renderTab();
+      return;
+    }
+    const goto = e.target.closest('[data-goto]');
+    if (goto) {
+      e.preventDefault();
+      A.tab = goto.dataset.goto;
+      LS.set('dw_admin_tab', A.tab);
+      renderTab();
+      window.scrollTo(0, 0);
       return;
     }
     const el = e.target.closest('[data-act]');
@@ -578,29 +983,31 @@
       } else if (act === 'reveal') openReveal(comp(cid));
       else if (act === 'reset') {
         const c = comp(cid);
+        const n = c.votedCount || 0;
         const ok = await confirmSheet({
           title: `Reset ${c.title}?`,
-          body: `This deletes all ${c.voted.length} ballot${c.voted.length === 1 ? '' : 's'} for ${esc(c.title)}. Every team will be able to vote again.`,
-          cta: `Delete ${c.voted.length} ballot${c.voted.length === 1 ? '' : 's'}`,
+          body: `This deletes all ${plural(n, 'ballot', 'ballots')} for ${esc(c.title)}. Everyone will be able to vote again.`,
+          cta: `Delete ${plural(n, 'ballot', 'ballots')}`,
         });
         if (ok) {
           A.data = await api('/api/admin/reset', { method: 'POST', body: { competitionId: cid } });
           renderTab();
           toast('Votes reset');
         }
-      } else if (act === 'ballot') {
-        const c = comp(cid);
-        const t = A.data.teams.find((x) => x.id === el.dataset.team);
-        const v = c.voted.find((x) => x.teamId === el.dataset.team);
+      } else if (act === 'voter-ballot') {
+        const c = comp(el.dataset.comp);
+        const v = employees().find((x) => x.id === el.dataset.voter);
+        if (!c || !v) return;
+        const at = v.voted && v.voted[c.id];
         const ok = await confirmSheet({
-          title: t.name,
-          body: `Voted in ${esc(c.title)} on ${esc(fmtTime(v.at))}.<br>If the team made a mistake, delete their ballot so they can vote again.`,
+          title: v.name,
+          body: `Voted in ${esc(c.title)}${at ? ` on ${esc(fmtTime(at))}` : ''}.<br>If they made a mistake, delete this ballot so they can vote again.`,
           cta: 'Delete this ballot',
         });
         if (ok) {
-          A.data = await api('/api/admin/reset', { method: 'POST', body: { competitionId: cid, teamId: t.id } });
+          A.data = await api('/api/admin/reset', { method: 'POST', body: { competitionId: c.id, voterId: v.id } });
           renderTab();
-          toast(`${t.name} can vote again in ${c.title}`);
+          toast(`${v.name} can vote again in ${c.title}`);
         }
       } else if (act === 'export') await busy(el, () => download(el.dataset.type));
       else if (act === 'reset-all') {
@@ -618,18 +1025,11 @@
         A.data = await api('/api/admin/photo', { method: 'POST', body: { remove: true } });
         renderTab();
         toast('Photo removed');
-      } else if (act === 'copy') await copy(el.dataset.text, 'Link copied');
-      else if (act === 'copy-invite') {
-        const t = A.data.teams.find((x) => x.id === row.dataset.teamId);
-        if (!t) return;
-        if ($('.tr-pin', row).value.trim() !== t.pin || $('.tr-name', row).value.trim() !== t.name) return toast('Save the teams first, then copy the link.', true);
-        await copy(inviteText(t), `Invite for ${t.name} copied — send it to the team lead`);
-      } else if (act === 'copy-all') {
-        await copy(A.data.teams.map((t) => `${t.name} (PIN ${t.pin})\n${inviteUrl(t)}`).join('\n\n'), 'All invites copied');
-      } else if (act === 'add-team') {
+      } else if (act === 'copy') await copy(el.dataset.text, 'Copied');
+      else if (act === 'add-team') {
         const rows = $('#teamRows');
         const n = rows.children.length;
-        rows.insertAdjacentHTML('beforeend', teamRow({ name: `Team ${n + 1}`, pin: '' }, n));
+        rows.insertAdjacentHTML('beforeend', teamRow({ name: `Team ${n + 1}` }, n));
         const input = rows.lastElementChild.querySelector('.tr-name');
         input.focus();
         input.select();
@@ -646,6 +1046,18 @@
   });
 
   root.addEventListener('change', async (e) => {
+    const own = e.target.closest('[data-act="own-team"]');
+    if (own) {
+      const cid = own.closest('.comp-panel').dataset.id;
+      try {
+        await setComp(cid, { noOwnTeam: own.checked });
+        toast(own.checked ? 'Own-team voting is now blocked for this competition' : 'Members can now vote for their own team here');
+      } catch (ex) {
+        own.checked = !own.checked;
+        toast(ex.message, true);
+      }
+      return;
+    }
     const el = e.target.closest('[data-act="publish"]');
     if (!el) return;
     const cid = el.closest('.comp-panel').dataset.id;
@@ -659,6 +1071,12 @@
   });
 
   /* ---------------- polling ---------------- */
+  function voteKeys(emps) {
+    const s = new Set();
+    (emps || []).forEach((e) => Object.keys(e.voted || {}).forEach((cid) => s.add(e.id + '|' + cid)));
+    return s;
+  }
+
   function startPolling() {
     clearInterval(A.poll);
     A.poll = setInterval(async () => {
@@ -670,24 +1088,24 @@
         return;
       }
       if (!A.data) return;
-      const before = new Set();
-      A.data.competitions.forEach((c) => c.voted.forEach((v) => before.add(c.id + '|' + v.teamId)));
+      const before = voteKeys(A.data.employees);
       const fresh = [];
-      d.competitions.forEach((c) =>
-        c.voted.forEach((v) => {
-          if (!before.has(c.id + '|' + v.teamId)) {
-            const t = d.teams.find((x) => x.id === v.teamId);
-            fresh.push(`${t ? t.name : 'A team'} voted in ${c.title}`);
+      (d.employees || []).forEach((e) =>
+        Object.keys(e.voted || {}).forEach((cid) => {
+          if (!before.has(e.id + '|' + cid)) {
+            const c = d.competitions.find((x) => x.id === cid);
+            fresh.push(`${e.name} voted in ${c ? c.title : cid}`);
           }
         })
       );
       const changed = JSON.stringify(d) !== JSON.stringify(A.data);
       A.data = d;
       if (fresh.length) {
-        toast('✓ ' + fresh.join(' · '));
+        toast(fresh.length > 3 ? `✓ ${fresh.length} new votes` : '✓ ' + fresh.join(' · '));
         Sound.chime(1046.5, 0.08);
       }
-      if (changed && A.tab === 'live' && !document.querySelector('.sheet-wrap')) {
+      const typingInSearch = document.activeElement && document.activeElement.id === 'voterSearch';
+      if (changed && A.tab === 'live' && !document.querySelector('.sheet-wrap') && !typingInSearch) {
         const y = window.scrollY;
         renderTab();
         window.scrollTo(0, y);

@@ -1,0 +1,271 @@
+/* admin-extra.css — organiser console additions for v2:
+ * employee import, SMTP settings, voters table, teams without PINs. Uses the variables from styles.css. */
+
+/* small competition icons (also used inside table headers) */
+.pc-ic.sm {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+}
+.pc-ic.sm .ic {
+  width: 17px;
+  height: 17px;
+}
+.pc-ic.k-male {
+  color: var(--cyan-soft);
+  background: linear-gradient(180deg, rgba(0, 170, 204, 0.3), rgba(0, 170, 204, 0.08));
+}
+.pc-ic.k-female {
+  color: var(--rani-soft);
+  background: linear-gradient(180deg, rgba(229, 38, 125, 0.32), rgba(229, 38, 125, 0.08));
+}
+.banner a {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+/* ---------- voters ---------- */
+.voters-panel {
+  margin-bottom: 16px;
+}
+.vp-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.vp-head h2 {
+  margin: 0 0 2px;
+}
+.vp-head p {
+  margin: 0;
+}
+.vp-search {
+  margin: 0;
+  flex: 0 1 340px;
+  min-width: 220px;
+}
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 12px;
+}
+.vt {
+  min-width: 640px;
+}
+.vt th {
+  white-space: nowrap;
+}
+.vt td:first-child {
+  width: auto;
+  color: var(--text);
+  font-weight: 700;
+}
+.vt td.vt-email {
+  color: var(--muted);
+  font-size: 13px;
+  word-break: break-all;
+}
+.vt th.ck-col,
+.vt td.ck {
+  width: 58px;
+  text-align: center;
+}
+.vt th.ck-col .pc-ic {
+  margin: 0 auto;
+}
+.vt tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+.vt td.ck.no {
+  color: var(--faint);
+}
+.vt td.ck.na {
+  color: rgba(255, 245, 225, 0.25);
+}
+.ck-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 201, 74, 0.55);
+  background: rgba(255, 201, 74, 0.16);
+  color: var(--gold-hi);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+.ck-btn:hover {
+  background: rgba(255, 201, 74, 0.3);
+  transform: scale(1.06);
+}
+.ck-btn .ic {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2.6;
+}
+
+/* ---------- employees import ---------- */
+.emp-current {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.emp-current b {
+  color: var(--text);
+}
+.field textarea.emp-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  tab-size: 18;
+}
+.import-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+  align-items: center;
+}
+.import-stats .stat {
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.import-stats .stat b {
+  color: var(--text);
+}
+.problems {
+  margin: 0;
+  padding: 10px 14px 10px 30px;
+  border-radius: 12px;
+  background: rgba(255, 107, 129, 0.08);
+  border: 1px solid rgba(255, 107, 129, 0.38);
+  color: #ffc2cc;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.problems.notes {
+  background: rgba(255, 201, 74, 0.07);
+  border-color: rgba(255, 201, 74, 0.32);
+  color: var(--gold-hi);
+}
+
+/* ---------- SMTP ---------- */
+.note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 170, 204, 0.1);
+  border: 1px solid rgba(0, 170, 204, 0.35);
+  color: #c4f1ff;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.smtp-grid {
+  display: grid;
+  gap: 12px;
+}
+.smtp-spacer {
+  display: none;
+}
+.field select,
+.inp {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+}
+.field select option {
+  background: #0d2a5c;
+  color: var(--text);
+}
+.field select:focus,
+.inp:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 201, 74, 0.18);
+}
+.smtp-test-box {
+  display: grid;
+  gap: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.smtp-test-box .field-label {
+  font-weight: 700;
+  font-size: 13.5px;
+}
+.smtp-test {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.smtp-test .inp {
+  flex: 1 1 240px;
+  width: auto;
+}
+.smtp-result {
+  margin: 0;
+  min-height: 1.3em;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.smtp-result.ok {
+  color: var(--ok);
+}
+.smtp-result.err {
+  color: var(--danger);
+}
+
+/* ---------- teams (no PINs) ---------- */
+.team-rows-head.v2,
+.team-row.v2 {
+  grid-template-columns: 28px 1fr 96px 36px;
+}
+.tr-members {
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+}
+
+@media (min-width: 700px) {
+  .smtp-grid {
+    grid-template-columns: 2fr 1fr 1.6fr;
+  }
+  .smtp-spacer {
+    display: block;
+  }
+}
+@media (max-width: 700px) {
+  .team-row.v2 {
+    grid-template-columns: 22px 1fr 70px 36px;
+  }
+  .vp-search {
+    flex: 1 1 100%;
+  }
+}
+
+/* per-competition "no voting for own team" rule */
+.comp-panel .own-team-rule {
+  margin-top: 14px;
+  font-size: 13.5px;
+}

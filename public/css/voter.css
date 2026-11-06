@@ -1,0 +1,109 @@
+/* voter.css — email + code login and the voter's team chip. Builds on styles.css (load after it). */
+
+.login-screen {
+  max-width: 520px;
+}
+.login-card {
+  margin: 6px auto 0;
+  padding: 22px 18px 20px;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--line-gold);
+  box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.7);
+  text-align: center;
+}
+.login-diya .diya {
+  width: 74px;
+  height: 74px;
+  margin: -4px auto 6px;
+}
+.login-lead {
+  margin: 4px auto 18px;
+  max-width: 34ch;
+  line-height: 1.5;
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+.field-lbl {
+  font-weight: 700;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.text-input {
+  width: 100%;
+  height: 56px;
+  padding: 0 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 201, 74, 0.38);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font: 600 17px var(--font);
+}
+.text-input::placeholder {
+  color: rgba(255, 245, 225, 0.35);
+  font-weight: 500;
+}
+.text-input:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 4px rgba(255, 201, 74, 0.2);
+}
+.otp-input {
+  margin-top: 0;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+}
+.login-form .form-error {
+  margin: 0;
+  text-align: center;
+  line-height: 1.45;
+}
+.form-error.is-info {
+  color: var(--gold-hi);
+}
+.login-form .btn {
+  margin-top: 4px;
+}
+.login-links {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 12px;
+}
+.login-links .link-btn:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+.login-note {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* hub: "Team: …" chip under the voter's name */
+.team-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  margin-top: 4px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 201, 74, 0.12);
+  border: 1px solid rgba(255, 201, 74, 0.35);
+  color: var(--gold-hi);
+  font-weight: 600;
+  font-size: 13px;
+}
+.team-chip .ic {
+  width: 16px;
+  height: 16px;
+}
+.hub-hello .h1 {
+  overflow-wrap: anywhere;
+}
