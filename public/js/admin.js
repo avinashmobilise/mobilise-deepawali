@@ -14,8 +14,10 @@
     revealing: false,
     poll: null,
     voterQuery: '',
+    memberQuery: '',
+    memberFilter: 'all',
   };
-  if (!['live', 'setup', 'teams'].includes(A.tab)) A.tab = 'live';
+  if (!['live', 'setup', 'teams', 'members'].includes(A.tab)) A.tab = 'live';
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const ordinal = (n) => ['', '1st', '2nd', '3rd'][n] || n + 'th';
   const fmtAvg = (n) => String(Math.round(n * 100) / 100);
@@ -234,7 +236,7 @@
   </div>
 </header>
 <nav class="tabs" role="tablist" aria-label="Sections">
-  ${[['live', 'Live results'], ['setup', 'Setup'], ['teams', 'Teams']]
+  ${[['live', 'Live results'], ['setup', 'Setup'], ['teams', 'Teams'], ['members', 'Members']]
     .map(([k, l]) => `<button role="tab" type="button" class="tab" data-tab="${k}">${l}</button>`)
     .join('')}
 </nav>
@@ -274,6 +276,9 @@
     } else if (A.tab === 'teams') {
       body.innerHTML = teamsTab();
       bindTeams();
+    } else if (A.tab === 'members') {
+      body.innerHTML = membersTab();
+      bindMembers();
     } else {
       body.innerHTML = liveTab();
       bindLive();
@@ -1114,6 +1119,215 @@ ${votersPanel()}
     });
   }
 
+  /* ---------------- members tab: see and fix everyone's name, email, gender and team ---------------- */
+  const compShort = (c) => (c.kind === 'teams' ? 'Desk' : c.kind === 'male' ? 'Male' : c.kind === 'female' ? 'Female' : c.title);
+
+  function memberRow(e, comps, teams) {
+    const tags = [];
+    if (e.isLeader) tags.push('<span class="mtag leader">leader</span>');
+    for (const c of comps)
+      if (e.voted && e.voted[c.id]) tags.push(`<span class="mtag voted" title="${esc(c.title)} · ${esc(fmtTime(e.voted[c.id]))}">✓ ${esc(compShort(c))}</span>`);
+    const teamId = e.teamId && teams.some((t) => t.id === e.teamId) ? e.teamId : '';
+    const g = e.gender || '';
+    return `<div class="mrow${e.email ? '' : ' no-email'}${g ? '' : ' no-gender'}" data-emp="${esc(e.id)}" data-team="${esc(teamId)}" data-q="${esc(`${e.name} ${e.email || ''}`.toLowerCase())}">
+  ${tags.length ? `<div class="mrow-tags">${tags.join('')}</div>` : ''}
+  <label class="mf mf-name"><span class="sr-only">Name</span><input name="name" value="${esc(e.name)}" data-orig="${esc(e.name)}" maxlength="80" autocomplete="off"></label>
+  <label class="mf mf-email"><span class="sr-only">Email</span><input name="email" type="email" value="${esc(e.email || '')}" data-orig="${esc(e.email || '')}" placeholder="add email, e.g. name@gmail.com" autocomplete="off" spellcheck="false" inputmode="email"></label>
+  <label class="mf mf-gender"><span class="sr-only">Gender</span><select name="gender" data-orig="${esc(g)}">
+    <option value=""${g ? '' : ' selected'}>—</option><option value="M"${g === 'M' ? ' selected' : ''}>Male</option><option value="F"${g === 'F' ? ' selected' : ''}>Female</option></select></label>
+  <label class="mf mf-team"><span class="sr-only">Team</span><select name="teamId" data-orig="${esc(teamId)}">
+    <option value=""${teamId ? '' : ' selected'}>No team</option>${teams.map((t) => `<option value="${esc(t.id)}"${t.id === teamId ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}</select></label>
+  <button class="btn btn-gold sm msave" type="button" data-act="msave" disabled>Save</button>
+  <p class="mrow-err" role="alert"></p>
+</div>`;
+  }
+
+  function membersTab() {
+    const d = A.data;
+    const emps = employees();
+    const teams = d.teams || [];
+    const comps = d.competitions || [];
+    const known = new Set(teams.map((t) => t.id));
+    const inTeam = emps.filter((e) => e.teamId && known.has(e.teamId));
+    const counts = {
+      all: emps.length,
+      inteam: inTeam.length,
+      noteam: emps.length - inTeam.length,
+      noemail: emps.filter((e) => !e.email).length,
+      nogender: emps.filter((e) => !e.gender).length,
+    };
+    const pill = (key, label, warn) =>
+      `<button type="button" class="mpill${A.memberFilter === key ? ' on' : ''}${warn && counts[key] ? ' warn' : ''}" data-mfilter="${key}"><b>${counts[key]}</b> ${label}</button>`;
+    const byName = (a, b) => a.name.localeCompare(b.name);
+    const head = `<div class="mhead" aria-hidden="true"><span>Name</span><span>Email</span><span>Gender</span><span>Team</span><span></span></div>`;
+    const sections = teams.map((t) => {
+      const list = inTeam.filter((e) => e.teamId === t.id).sort((a, b) => (b.isLeader ? 1 : 0) - (a.isLeader ? 1 : 0) || byName(a, b));
+      return `<section class="panel msection" data-section="${esc(t.id)}">
+  <div class="msection-head"><h3>${esc(t.name)}</h3><span class="muted sm">Leader: ${esc(t.leaderName || '—')} · <span class="mcount">${plural(list.length, 'person', 'people')}</span></span></div>
+  ${list.length ? head + list.map((e) => memberRow(e, comps, teams)).join('') : '<p class="muted sm mnone">Nobody in this team yet.</p>'}
+</section>`;
+    });
+    const loose = emps.filter((e) => !(e.teamId && known.has(e.teamId))).sort(byName);
+    sections.push(`<section class="panel msection" data-section="">
+  <div class="msection-head"><h3>No team</h3><span class="muted sm"><span class="mcount">${plural(loose.length, 'person', 'people')}</span> · pick a team to add them</span></div>
+  ${loose.length ? head + loose.map((e) => memberRow(e, comps, teams)).join('') : '<p class="muted sm mnone">Everyone is in a team. 🎉</p>'}
+</section>`);
+    const opt = (v, l) => `<option value="${esc(v)}"${A.memberFilter === v ? ' selected' : ''}>${esc(l)}</option>`;
+    return `
+<div id="membersTab">
+  <div class="panel members-top">
+    <div><h2>Members of every team</h2>
+    <p class="muted sm">Fix anything a team leader missed: change a name, add a missing email (a Gmail address is fine), set the gender or move someone to another team. Each row saves on its own.</p></div>
+    <div class="mpills">${pill('all', 'people')}${pill('inteam', 'in a team')}${pill('noteam', 'no team', true)}${pill('noemail', 'missing email', true)}${pill('nogender', 'missing gender', true)}</div>
+    <div class="mtools">
+      <label class="search">${ICONS.search}<input type="search" id="memberSearch" placeholder="Search name or email" value="${esc(A.memberQuery)}" autocomplete="off" aria-label="Search members"></label>
+      <select id="memberFilter" aria-label="Filter">${opt('all', 'Everyone')}${opt('inteam', 'In a team')}${teams.map((t) => opt('team:' + t.id, t.name)).join('')}${opt('noteam', 'No team')}${opt('noemail', 'Missing email')}${opt('nogender', 'Missing gender')}</select>
+    </div>
+  </div>
+  ${emps.length ? sections.join('') : `<div class="panel"><p class="muted">No employees yet. Import the employee master in <a href="#" data-goto="setup">Setup → Employees</a>.</p></div>`}
+  <p class="mempty muted" id="memberEmpty" hidden>Nobody matches this search or filter.</p>
+</div>`;
+  }
+
+  function filterMembers() {
+    const box = $('#membersTab');
+    if (!box) return;
+    const words = A.memberQuery.toLowerCase().split(/\s+/).filter(Boolean);
+    const f = A.memberFilter;
+    let shownTotal = 0;
+    $$('.msection', box).forEach((sec) => {
+      let shown = 0;
+      $$('.mrow', sec).forEach((r) => {
+        const q = r.dataset.q || '';
+        let ok = words.every((w) => q.includes(w));
+        if (ok && f !== 'all') {
+          if (f === 'inteam') ok = !!r.dataset.team;
+          else if (f === 'noteam') ok = !r.dataset.team;
+          else if (f === 'noemail') ok = r.classList.contains('no-email');
+          else if (f === 'nogender') ok = r.classList.contains('no-gender');
+          else if (f.startsWith('team:')) ok = r.dataset.team === f.slice(5);
+        }
+        r.hidden = !ok;
+        if (ok) shown++;
+      });
+      const filtering = words.length || f !== 'all';
+      sec.hidden = filtering && !shown;
+      const head = $('.mhead', sec);
+      if (head) head.hidden = !shown;
+      shownTotal += shown;
+    });
+    const empty = $('#memberEmpty');
+    if (empty) empty.hidden = shownTotal > 0 || !employees().length;
+    $$('.mpill', box).forEach((p) => p.classList.toggle('on', p.dataset.mfilter === f));
+    const sel = $('#memberFilter');
+    if (sel && sel.value !== f) sel.value = f;
+  }
+
+  function memberChanges(row) {
+    const out = {};
+    for (const el of $$('input[name], select[name]', row)) {
+      let v = el.value;
+      if (el.name === 'name') v = v.trim();
+      if (el.name === 'email') v = v.trim().toLowerCase();
+      if (v !== (el.dataset.orig || '')) out[el.name] = v;
+    }
+    return out;
+  }
+
+  function markMemberRow(row) {
+    const dirty = Object.keys(memberChanges(row)).length > 0;
+    row.classList.toggle('dirty', dirty);
+    const btn = $('.msave', row);
+    if (btn) btn.disabled = !dirty;
+    row.classList.remove('has-err');
+    const err = $('.mrow-err', row);
+    if (err) err.textContent = '';
+  }
+
+  async function saveMemberRow(row) {
+    const changes = memberChanges(row);
+    if (!Object.keys(changes).length) return;
+    const btn = $('.msave', row);
+    const err = $('.mrow-err', row);
+    const fail = (msg) => {
+      row.classList.add('has-err');
+      err.textContent = msg;
+      toast(msg, true);
+    };
+    if ('name' in changes && !changes.name) return fail('The name can’t be empty.');
+    if ('email' in changes && changes.email && !EMAIL_RE.test(changes.email)) return fail(`“${changes.email}” is not a valid email address.`);
+    const name = changes.name || ($('input[name=name]', row) || {}).value || 'member';
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      const body = { id: row.dataset.emp, ...changes };
+      if ('teamId' in body && !body.teamId) body.teamId = null;
+      A.data = await api('/api/admin/employee', { method: 'POST', body });
+      toast(`Saved ${name}`);
+      const y = window.scrollY;
+      renderTab();
+      window.scrollTo(0, y);
+    } catch (ex) {
+      btn.textContent = 'Save';
+      btn.disabled = false;
+      fail(ex.message);
+    }
+  }
+
+  function bindMembers() {
+    const box = $('#membersTab');
+    if (!box) return;
+    filterMembers();
+    const search = $('#memberSearch');
+    if (search)
+      search.addEventListener('input', () => {
+        A.memberQuery = search.value;
+        filterMembers();
+      });
+    const sel = $('#memberFilter');
+    if (sel)
+      sel.addEventListener('change', () => {
+        A.memberFilter = sel.value;
+        filterMembers();
+      });
+    box.addEventListener('click', (e) => {
+      const p = e.target.closest('[data-mfilter]');
+      if (p) {
+        A.memberFilter = A.memberFilter === p.dataset.mfilter && p.dataset.mfilter !== 'all' ? 'all' : p.dataset.mfilter;
+        filterMembers();
+        return;
+      }
+      const save = e.target.closest('[data-act="msave"]');
+      if (save) {
+        e.stopPropagation(); // handled here, not by the global click handler
+        const row = save.closest('.mrow');
+        if (row) saveMemberRow(row);
+      }
+    });
+    const onEdit = (e) => {
+      const row = e.target.closest('.mrow');
+      if (row) markMemberRow(row);
+    };
+    box.addEventListener('input', onEdit);
+    box.addEventListener('change', onEdit);
+    box.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const row = e.target.closest('.mrow');
+      if (!row || !e.target.matches('input')) return;
+      e.preventDefault();
+      saveMemberRow(row);
+    });
+  }
+
+  /** Polling must not wipe what the organiser is typing in the Members tab. */
+  function membersBusy() {
+    const box = $('#membersTab');
+    if (!box) return false;
+    if ($('.mrow.dirty', box)) return true;
+    const a = document.activeElement;
+    return !!(a && box.contains(a) && a.matches('input, select, textarea'));
+  }
+
   /* ---------------- events ---------------- */
   root.addEventListener('click', async (e) => {
     const tab = e.target.closest('[data-tab]');
@@ -1314,7 +1528,11 @@ ${votersPanel()}
         Sound.chime(1046.5, 0.08);
       }
       const typingInSearch = document.activeElement && document.activeElement.id === 'voterSearch';
-      if (changed && A.tab === 'live' && !document.querySelector('.sheet-wrap') && !typingInSearch) {
+      const refresh =
+        changed &&
+        !document.querySelector('.sheet-wrap') &&
+        ((A.tab === 'live' && !typingInSearch) || (A.tab === 'members' && !membersBusy()));
+      if (refresh) {
         const y = window.scrollY;
         renderTab();
         window.scrollTo(0, y);

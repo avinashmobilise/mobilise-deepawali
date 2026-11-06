@@ -1274,6 +1274,44 @@ async function handleApi(req, res, url) {
       return send(res, 200, adminData());
     }
 
+    // Organiser fixes one person: name, email (e.g. add a missing Gmail), gender or team.
+    if (m === 'POST' && p === '/api/admin/employee') {
+      const b = await readJson(req);
+      const emp = db.employees.find((e) => e.id === b.id);
+      if (!emp) return send(res, 404, { error: 'That employee no longer exists. Please reload the page.' });
+      const leads = emp.email ? db.teams.find((t) => t.leaderEmail && t.leaderEmail === emp.email) : null;
+      const next = { name: emp.name, email: emp.email, teamId: emp.teamId || null, gender: emp.gender || '' };
+      if (b.name != null) {
+        const n = cleanText(b.name, 80);
+        if (!n) return send(res, 400, { error: 'The name cannot be empty.' });
+        next.name = n;
+      }
+      if (b.email != null) {
+        const em = normEmail(b.email);
+        if (em && !validEmail(em)) return send(res, 400, { error: `“${String(b.email).trim()}” is not a valid email address.` });
+        const other = em ? db.employees.find((e) => e.id !== emp.id && e.email === em) : null;
+        if (other) return send(res, 409, { error: `${em} already belongs to ${other.name}.` });
+        if (!em && leads) return send(res, 400, { error: `${emp.name} leads ${leads.name}, so the email can't be empty.` });
+        next.email = em;
+      }
+      if (b.teamId !== undefined) {
+        const tid = b.teamId ? String(b.teamId) : null;
+        if (tid && !db.teams.some((t) => t.id === tid)) return send(res, 400, { error: 'That team no longer exists. Please reload the page.' });
+        if (leads && tid !== leads.id) return send(res, 400, { error: `${emp.name} leads ${leads.name}. Choose another leader for that team in the Teams tab first.` });
+        next.teamId = tid;
+      }
+      if (b.gender != null) next.gender = normGender(b.gender);
+      if (next.email !== emp.email) {
+        if (emp.email) otps.delete(emp.email); // pending login codes for the old address die
+        if (leads) leads.leaderEmail = next.email;
+      }
+      Object.assign(emp, next);
+      if (leads) leads.leaderName = emp.name;
+      await mustSave();
+      console.log(`  ✓ Organiser updated ${emp.name}`);
+      return send(res, 200, adminData());
+    }
+
     if (m === 'POST' && p === '/api/admin/teams') {
       const b = await readJson(req);
       if (!Array.isArray(b.teams) || b.teams.length < 2 || b.teams.length > 200)
