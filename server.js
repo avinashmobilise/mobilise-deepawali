@@ -637,8 +637,8 @@ function entriesForVoter(comp, voter) {
   return list.filter((e) => e.id !== voter.id && !(ownTeam && e.teamId === ownTeam));
 }
 
-/** Ranked results. Ranking is by average score (fair even if not everyone voted),
- *  then by number of votes; identical average + votes share a rank. */
+/** Ranked results — organiser's rule: the MOST TOTAL POINTS wins.
+ *  Ties on total are broken by the higher average; identical total + average share a rank. */
 function computeResults(comp) {
   const rows = entriesFor(comp).map((e) => ({ id: e.id, name: e.name, total: 0, votes: 0, avg: 0, rank: 0 }));
   const byId = new Map(rows.map((r) => [r.id, r]));
@@ -654,10 +654,10 @@ function computeResults(comp) {
     }
   }
   for (const r of rows) r.avg = r.votes ? r.total / r.votes : 0;
-  rows.sort((a, b) => b.avg - a.avg || b.votes - a.votes || a.name.localeCompare(b.name));
+  rows.sort((a, b) => b.total - a.total || b.avg - a.avg || a.name.localeCompare(b.name));
   rows.forEach((r, i) => {
     const prev = rows[i - 1];
-    r.rank = prev && prev.avg === r.avg && prev.votes === r.votes ? prev.rank : i + 1;
+    r.rank = prev && prev.total === r.total && prev.avg === r.avg ? prev.rank : i + 1;
   });
   return rows.map((r) => ({ ...r, avg: round2(r.avg) }));
 }
@@ -684,7 +684,7 @@ function publicState() {
       podium: c.published
         ? computeResults(c)
             .filter((r) => r.votes > 0 && r.rank <= 3)
-            .map(({ id, name, avg, rank, votes }) => ({ id, name, avg, rank, votes }))
+            .map(({ id, name, total, avg, rank, votes }) => ({ id, name, total, avg, rank, votes }))
         : null,
     })),
     emailLogin: { ready: emailConfigured() },

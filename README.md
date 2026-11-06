@@ -95,7 +95,7 @@ The free service goes to sleep after 15 minutes without visitors. The first visi
 
 - Each person scores every entry from 1 to 10 and must score everyone before submitting. After that the ballot is locked.
 - Nobody scores their own team's desk or their own outfit.
-- Ranking uses the **average score received**, so bigger teams don't get an advantage. Ties are broken by the number of votes. Entries with the same average and the same votes share a rank ("Joint 2nd").
+- **The most total points wins** (all the 1–10 scores an entry received, added up). Ties on points are broken by the higher average; the same points and the same average share a rank ("Joint 2nd"). Note: in Best Desk a team's own members can't score it, so bigger teams receive fewer scores.
 - Only the top 3 are shown publicly, and only after the organiser publishes them.
 
 ## Security notes

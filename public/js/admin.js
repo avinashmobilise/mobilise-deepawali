@@ -295,7 +295,7 @@
     const rows = c.results
       .map(
         (r, i) => `<tr class="${i >= 5 && !open ? 'more' : ''}${r.votes && r.rank <= 3 ? ' top r' + r.rank : ''}">
-  <td>${r.votes ? r.rank : '–'}</td><td>${esc(r.name)}</td><td class="num">${r.votes ? fmtAvg(r.avg) : '–'}</td><td class="num">${r.votes}</td></tr>`
+  <td>${r.votes ? r.rank : '–'}</td><td>${esc(r.name)}</td><td class="num"><b>${r.votes ? r.total : '–'}</b></td><td class="num">${r.votes ? fmtAvg(r.avg) : '–'}</td><td class="num">${r.votes}</td></tr>`
       )
       .join('');
     return `
@@ -309,10 +309,10 @@
     </div>
   </header>
   <div class="meter" aria-hidden="true"><span style="width:${eligible ? Math.min(100, (votedCount / eligible) * 100) : 0}%"></span></div>
-  <h3 class="sub-h">Live leaderboard <span class="faint">(average score)</span></h3>
+  <h3 class="sub-h">Live leaderboard <span class="faint">(most total points wins)</span></h3>
   ${
     c.results.length
-      ? `<table class="lb"><thead><tr><th>#</th><th>Name</th><th class="num">Avg</th><th class="num">Votes</th></tr></thead><tbody>${rows}</tbody></table>
+      ? `<table class="lb"><thead><tr><th>#</th><th>Name</th><th class="num">Points</th><th class="num">Avg</th><th class="num">Votes</th></tr></thead><tbody>${rows}</tbody></table>
          ${c.results.length > 5 ? `<button class="link-btn sm" type="button" data-act="more">${open ? 'Show top 5' : `Show all ${c.results.length}`}</button>` : ''}`
       : `<p class="muted sm">No ${c.kind === 'teams' ? 'teams' : 'participants'} yet. ${c.kind === 'teams' ? 'Add them in the Teams tab.' : 'Import employees in Setup.'}</p>`
   }
@@ -1612,7 +1612,7 @@ ${votersPanel()}
       card.innerHTML = `<div class="rv-medal" aria-hidden="true">${['', '🥇', '🥈', '🥉'][g.rank]}</div>
 <div class="rv-rank">${g.list.length > 1 ? 'Joint ' : ''}${ordinal(g.rank)} place</div>
 ${g.list.map((w) => `<div class="rv-name">${esc(w.name)}</div>`).join('')}
-<div class="rv-avg">${fmtAvg(g.list[0].avg)} / 10 average · ${g.list[0].votes} votes</div>`;
+<div class="rv-avg">${g.list[0].total} points · ${fmtAvg(g.list[0].avg)} average · ${g.list[0].votes} votes</div>`;
       $('#rvCards').appendChild(card);
     }
     function celebrate(rank) {

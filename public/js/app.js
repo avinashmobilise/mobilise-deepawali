@@ -1551,7 +1551,7 @@
   <div class="pod-names">${
     list.length ? list.map((x) => `<span class="pod-name">${esc(x.name)}</span>`).join('') : '<span class="pod-name faint">—</span>'
   }</div>
-  ${list.length ? `<span class="pod-score">${fmtAvg(list[0].avg)} / 10${list.length > 1 ? ' · tie' : ''}</span>` : ''}
+  ${list.length ? `<span class="pod-score">${list[0].total != null ? `${list[0].total} points` : `${fmtAvg(list[0].avg)} / 10`}${list.length > 1 ? ' · tie' : ''}</span>` : ''}
   <div class="pod-block"><span class="pod-medal" aria-hidden="true">${['', '🥇', '🥈', '🥉'][rank]}</span><span class="pod-rank">${['', '1st', '2nd', '3rd'][rank]}</span></div>
 </div>`;
     };
