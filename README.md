@@ -35,9 +35,23 @@ The app runs at `http://localhost:3000` and the organiser console at `http://loc
 | `DATA_DIR` | `./data` | Where data is saved (`db.json`) when Upstash is not used |
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | not set | Store everything in a free Upstash Redis database. Needed on Render free, whose disk is wiped on every restart |
 
-## 2. Email for the login codes (SMTP)
+## 2. Email for the login codes
 
-Enter the SMTP settings in **/admin → Setup → Email for login codes**, then use **Send test email** to check them.
+### Option A (recommended): your own mail API over HTTPS
+
+The app can send each login code to an HTTPS endpoint on your own server, which then sends it with your normal mail account. This works on Render's free plan, because it does not use SMTP ports.
+
+1. Copy `diwali_utsav_mail.php` next to `Global/Communication/send_email.php` on your server.
+   - It is kept outside this repo because it contains the key.
+   - It calls `global_send_email([... 'instant' => true])`.
+   - It needs a secret key in the `X-Utsav-Key` header, accepts exactly one recipient per call, and caps the number of mails per minute.
+2. In **/admin → Setup → "your mail API"**, enter the endpoint URL and the same key, click **Save mail API**, then use **Send test email**.
+3. The email channel must be ON in your system (LeavePolicy → Settings). Otherwise the API answers "Email channel is disabled".
+4. Delete the PHP file after the event.
+
+### Option B: SMTP
+
+Enter the SMTP settings in **/admin → Setup → Email for login codes · SMTP**, then use **Send test email** to check them. If the mail API is filled in, it takes priority over SMTP.
 
 > ⚠️ **Render's free plan blocks outbound SMTP on ports 25, 465 and 587** (since September 2025). Office mail servers such as Gmail / Google Workspace, Microsoft 365 or Zoho use exactly those ports, so they will not work from Render free. Choose one of these instead:
 > - Use an email provider that offers **port 2525**: Brevo (free tier), SendGrid, Mailgun or SMTP2GO. Use security *STARTTLS*, port `2525`, and that provider's SMTP login. Set the *From* address to an address you have verified with the provider.

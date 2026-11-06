@@ -592,8 +592,22 @@ ${votersPanel()}
     <button class="btn btn-gold sm" type="submit" id="empSave">Save employees</button>
   </form>
 
+  <form class="panel span-2" id="mailApiForm" novalidate autocomplete="off">
+    <h2>Email for login codes · your mail API ${A.data.emailVia === 'api' ? '<span class="badge ok">In use</span>' : ''}</h2>
+    <p class="muted sm">Recommended on Render's free plan, which blocks SMTP. The app sends every login code to your own HTTPS endpoint, and that endpoint sends it with your normal mail account. Example: <code>https://alpha.mobilisepro.com/Global/Communication/diwali_utsav_mail.php</code>. When the URL and key are filled in, this is used instead of SMTP.</p>
+    <div class="smtp-grid">
+      <label class="field">Mail API URL<input name="url" value="${esc((A.data.settings.mailApi || {}).url || '')}" placeholder="https://…/diwali_utsav_mail.php" autocomplete="off" spellcheck="false" inputmode="url"></label>
+      <label class="field">Mail API key<input name="key" type="password" value="" placeholder="${(A.data.settings.mailApi || {}).keySet ? '•••••• saved' : 'the key from the PHP file'}" autocomplete="new-password"><small>${(A.data.settings.mailApi || {}).keySet ? 'Leave empty to keep the saved key.' : ''}</small></label>
+    </div>
+    <div class="row-btns">
+      <button class="btn btn-gold sm" type="submit">Save mail API</button>
+      ${(A.data.settings.mailApi || {}).url ? '<button class="btn btn-ghost sm" type="button" id="mailApiOff">Turn off (use SMTP instead)</button>' : ''}
+    </div>
+    <p class="form-note">Then use “Send a test email” below to check it.</p>
+  </form>
+
   <form class="panel span-2" id="smtpForm" novalidate autocomplete="off">
-    <h2>Email for login codes (SMTP)</h2>
+    <h2>Email for login codes · SMTP ${A.data.emailVia === 'smtp' ? '<span class="badge ok">In use</span>' : ''}</h2>
     <p class="muted sm">Everyone logs in with a 6-digit code sent to their office email. Add the details of the mailbox or email service that sends those codes.</p>
     <p class="note">Render's free plan blocks ports 25, 465 and 587. Use an email provider that offers port 2525 (Brevo, SendGrid, Mailgun, SMTP2GO), or upgrade the Render service to a paid instance.<br>
       Example for Brevo: host <code>smtp-relay.brevo.com</code> · port <code>2525</code> · STARTTLS · username = your Brevo SMTP login · password = an SMTP key. The "From email" must be a sender you verified with the provider.</p>
@@ -738,10 +752,41 @@ ${votersPanel()}
       });
     });
 
+    /* --- mail API --- */
+    const af = $('#mailApiForm');
+    let apiDirty = false;
+    af.addEventListener('input', () => (apiDirty = true));
+    const saveApi = async () => {
+      const url = af.elements.url.value.trim();
+      if (url && !/^https?:\/\/\S+$/i.test(url)) throw new Error('The mail API URL must start with https://');
+      A.data = await api('/api/admin/mailapi', { method: 'POST', body: { url, key: af.elements.key.value } });
+      apiDirty = false;
+    };
+    af.addEventListener('submit', (e) => {
+      e.preventDefault();
+      busy(af.querySelector('[type=submit]'), async () => {
+        await saveApi();
+        toast(A.data.emailVia === 'api' ? 'Mail API saved: login codes will go through it' : 'Mail API saved');
+        renderTab();
+      });
+    });
+    const apiOff = $('#mailApiOff');
+    if (apiOff)
+      apiOff.addEventListener('click', () =>
+        busy(apiOff, async () => {
+          A.data = await api('/api/admin/mailapi', { method: 'POST', body: { url: '', key: '' } });
+          toast('Mail API turned off');
+          renderTab();
+        })
+      );
+
     /* --- SMTP --- */
     const sf = $('#smtpForm');
     let smtpDirty = false;
-    sf.addEventListener('input', () => (smtpDirty = true));
+    // typing the test address must not count as an SMTP change (the test box lives inside this form)
+    sf.addEventListener('input', (e) => {
+      if (!e.target.closest('.smtp-test-box')) smtpDirty = true;
+    });
     sf.elements.security.addEventListener('change', () => {
       const p = Number(sf.elements.port.value);
       if (sf.elements.security.value === 'ssl' && (p === 587 || p === 2525 || p === 25 || !p)) sf.elements.port.value = 465;
@@ -788,23 +833,24 @@ ${votersPanel()}
         return;
       }
       busy(testBtn, async () => {
-        const savingFirst = smtpDirty;
+        const savingFirst = smtpDirty || apiDirty;
         let cls;
         let text;
         out.className = 'smtp-result';
         out.textContent = savingFirst ? 'Saving the settings, then sending…' : 'Sending… (this can take up to 30 seconds)';
         try {
-          if (savingFirst) await saveSmtp();
-          await api('/api/admin/smtp/test', { method: 'POST', body: { to } });
+          if (apiDirty) await saveApi();
+          if (smtpDirty) await saveSmtp();
+          const r = await api('/api/admin/smtp/test', { method: 'POST', body: { to } });
           cls = 'smtp-result ok';
-          text = `✓ Test email sent to ${to}. Check the inbox, and the spam folder too.`;
+          text = `✓ Test email sent to ${to}${r && r.via === 'api' ? ' through the mail API' : ' over SMTP'}${r && r.message ? ` (${r.message})` : ''}. Check the inbox, and the spam folder too.`;
           toast('Test email sent');
         } catch (ex) {
           cls = 'smtp-result err';
           text = '✗ ' + ex.message;
           toast('Test email failed', true);
         }
-        if (savingFirst && !smtpDirty) {
+        if (savingFirst && !smtpDirty && !apiDirty) {
           // settings were saved: re-render so the banners and the "saved" password hint update
           const y = window.scrollY;
           renderTab();

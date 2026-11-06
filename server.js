@@ -147,6 +147,17 @@ function defaultSmtp() {
   return { host: '', port: 587, secure: false, user: '', pass: '', fromEmail: '', fromName: 'Mobilise Diwali Utsav' };
 }
 
+/** HTTPS mail API (e.g. the company's PHP endpoint). When set it is used instead of SMTP —
+ *  needed on hosts that block outgoing SMTP ports, such as Render's free plan. */
+function normaliseMailApi(a) {
+  const src = a && typeof a === 'object' ? a : {};
+  const url = cleanText(src.url, 400);
+  return {
+    url: /^https?:\/\/[^\s"'<>]+$/i.test(url) ? url : '',
+    key: typeof src.key === 'string' ? src.key.replace(/[\r\n]/g, '').slice(0, 300) : '',
+  };
+}
+
 function defaultDb() {
   return {
     version: 2,
@@ -156,6 +167,7 @@ function defaultDb() {
       publicUrl: '',
       owner: { name: 'Ashish Sharma', title: 'Founder & Managing Director', message: DEFAULT_OWNER_MESSAGE, photo: '' },
       smtp: defaultSmtp(),
+      mailApi: normaliseMailApi(null),
     },
     teams: Array.from({ length: 10 }, (_, i) => ({ id: 't' + (i + 1), name: 'Team ' + (i + 1) })),
     employees: [],
@@ -191,6 +203,7 @@ function migrate(d) {
     publicUrl: typeof old.publicUrl === 'string' ? old.publicUrl : '',
     owner: Object.assign({}, def.settings.owner, old.owner && typeof old.owner === 'object' ? old.owner : {}),
     smtp: normaliseSmtp(Object.assign(defaultSmtp(), old.smtp && typeof old.smtp === 'object' ? old.smtp : {})),
+    mailApi: normaliseMailApi(old.mailApi),
   }; // v1 settings.requirePin is dropped here
 
   const seenTeams = new Set();
@@ -439,6 +452,42 @@ setInterval(() => {
 /* Email                                                               */
 /* ------------------------------------------------------------------ */
 const smtpConfigured = () => !!(db.settings.smtp.host && db.settings.smtp.fromEmail);
+const mailApiConfigured = () => !!(db.settings.mailApi.url && db.settings.mailApi.key);
+/** Can the app send login codes at all (mail API or SMTP)? */
+const emailConfigured = () => mailApiConfigured() || smtpConfigured();
+const emailVia = () => (mailApiConfigured() ? 'api' : smtpConfigured() ? 'smtp' : 'none');
+
+/** Send through the HTTPS mail API. Expects JSON {success, message} back. */
+async function sendViaApi({ to, subject, html }) {
+  const a = db.settings.mailApi;
+  let res;
+  try {
+    res = await fetch(a.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Utsav-Key': a.key },
+      // HTML goes base64-encoded so web-application firewalls don't mistake it for an attack
+      body: JSON.stringify({ to, subject, html_b64: Buffer.from(html, 'utf8').toString('base64') }),
+      signal: AbortSignal.timeout(25000),
+    });
+  } catch (err) {
+    const why = err && err.name === 'TimeoutError' ? 'no answer within 25 s' : (err && err.message) || 'network error';
+    throw Object.assign(new Error(`Could not reach the mail API at ${a.url} (${why}).`), { code: 'EAPI' });
+  }
+  const body = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    /* not JSON */
+  }
+  if (!res.ok || !data || data.success !== true) {
+    const why =
+      (data && data.message) ||
+      `HTTP ${res.status}${body ? ': ' + body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180) : ''}`;
+    throw Object.assign(new Error(`The mail API did not send the email: ${why}`), { code: 'EAPI' });
+  }
+  return { message: String(data.message || '') };
+}
 
 let transport = null;
 function getTransport() {
@@ -463,16 +512,18 @@ function getTransport() {
 }
 
 async function sendMail({ to, subject, text, html }) {
+  if (mailApiConfigured()) return sendViaApi({ to, subject, html });
   const s = db.settings.smtp;
-  return getTransport().sendMail({ from: { name: s.fromName, address: s.fromEmail }, to, subject, text, html });
+  await getTransport().sendMail({ from: { name: s.fromName, address: s.fromEmail }, to, subject, text, html });
+  return { message: 'Sent over SMTP.' };
 }
 
-/** Turn nodemailer errors into something an organiser can act on. Never includes the password. */
+/** Turn mail errors into something an organiser can act on. Never includes passwords or keys. */
 function describeSmtpError(err) {
   const code = (err && err.code) || '';
   const msg = String((err && err.message) || err || 'Unknown error').replace(/\s+/g, ' ').slice(0, 300);
   const where = `${db.settings.smtp.host}:${db.settings.smtp.port}`;
-  if (code === 'ENOMAILER') return msg;
+  if (code === 'ENOMAILER' || code === 'EAPI') return msg;
   if (code === 'EAUTH') return 'SMTP login failed — check username/password.';
   if (/wrong version number|ssl3_get_record|packet length too long|unknown protocol/i.test(msg))
     return `TLS mismatch talking to ${where} (${msg}). Port 465 needs “SSL/TLS” on; ports 587/2525 need it off (STARTTLS).`;
@@ -583,7 +634,7 @@ function publicState() {
             .map(({ id, name, avg, rank, votes }) => ({ id, name, avg, rank, votes }))
         : null,
     })),
-    emailLogin: { ready: smtpConfigured() },
+    emailLogin: { ready: emailConfigured() },
   };
 }
 
@@ -620,6 +671,7 @@ function adminData() {
         fromName: s.smtp.fromName,
         passSet: !!s.smtp.pass,
       },
+      mailApi: { url: s.mailApi.url, keySet: !!s.mailApi.key },
     },
     teams: db.teams.map((t) => ({ id: t.id, name: t.name, members: members.get(t.id) || 0 })),
     employees: db.employees.map((e) => ({
@@ -644,7 +696,8 @@ function adminData() {
     storage: USE_REDIS ? 'upstash' : 'file',
     // Render's free plan wipes the local disk on every restart / sleep.
     storageIsTemporary: !USE_REDIS && !!process.env.RENDER,
-    smtpConfigured: smtpConfigured(),
+    smtpConfigured: emailConfigured(), // "can send login codes" (mail API or SMTP)
+    emailVia: emailVia(),
   };
 }
 
@@ -851,7 +904,7 @@ async function handleApi(req, res, url) {
     const b = await readJson(req);
     const email = normEmail(b.email);
     if (!validEmail(email)) return send(res, 400, { code: 'EMAIL', error: 'Please enter a valid email address.' });
-    if (!smtpConfigured()) return send(res, 503, { code: 'EMAIL_OFF', error: 'Email login is not set up yet. Please ask the organiser.' });
+    if (!emailConfigured()) return send(res, 503, { code: 'EMAIL_OFF', error: 'Email login is not set up yet. Please ask the organiser.' });
     const ipList = recent(ipSends, clientIp(req), OTP_IP_WINDOW_MS);
     if (ipList.length >= OTP_IP_MAX) {
       const retry = Math.max(1, Math.ceil((OTP_IP_WINDOW_MS - (Date.now() - ipList[0])) / 1000));
@@ -1010,10 +1063,10 @@ async function handleApi(req, res, url) {
       const b = await readJson(req);
       const to = normEmail(b.to);
       if (!validEmail(to)) return send(res, 400, { error: 'Enter a valid email address to send the test to.' });
-      if (!smtpConfigured()) return send(res, 400, { error: 'Save the SMTP settings (host and “From” email) first.' });
+      if (!emailConfigured()) return send(res, 400, { error: 'Save the mail API (URL + key) or the SMTP settings first.' });
       const title = db.settings.eventTitle;
       try {
-        await sendMail({
+        const sent = await sendMail({
           to,
           subject: `Test email from ${title}`,
           text: `It works! Login codes for ${title} will be sent from this address.\n\n— Team Mobilise 🪔`,
@@ -1023,12 +1076,26 @@ async function handleApi(req, res, url) {
 <tr><td align="center" style="padding-top:8px;font-size:14px;color:#e8e1cf">Login codes will be sent from this address.</td></tr>`
           ),
         });
-        return send(res, 200, { ok: true });
+        return send(res, 200, { ok: true, via: emailVia(), message: sent && sent.message ? sent.message : '' });
       } catch (err) {
         const reason = describeSmtpError(err);
-        console.error('! SMTP test failed:', reason);
+        console.error('! Test email failed:', reason);
         return send(res, 502, { error: reason });
       }
+    }
+
+    if (m === 'POST' && p === '/api/admin/mailapi') {
+      const b = await readJson(req);
+      const cur = db.settings.mailApi;
+      const url = b.url != null ? cleanText(b.url, 400) : cur.url;
+      if (url && !/^https?:\/\/[^\s"'<>]+$/i.test(url)) return send(res, 400, { error: 'The mail API URL must start with https://' });
+      db.settings.mailApi = normaliseMailApi({
+        url,
+        key: typeof b.key === 'string' && b.key !== '' ? b.key : url ? cur.key : '', // empty = keep; clearing the URL clears the key
+      });
+      if (url && !db.settings.mailApi.key) return send(res, 400, { error: 'Enter the mail API key.' });
+      await mustSave();
+      return send(res, 200, adminData());
     }
 
     if (m === 'POST' && p === '/api/admin/employees') {
@@ -1196,7 +1263,15 @@ async function start() {
     console.log(`      Data stored in: ${USE_REDIS ? `Upstash Redis (key "${REDIS_KEY}")` : DB_FILE}`);
     console.log(`      Teams         : ${db.teams.length}`);
     console.log(`      Employees     : ${db.employees.length} (${db.employees.filter((e) => e.email).length} can log in with email)`);
-    console.log(`      Email (SMTP)  : ${smtpConfigured() ? `${s.host}:${s.port}${s.secure ? ' (SSL/TLS)' : ''} from ${s.fromEmail}` : 'not set up yet — add it in /admin → Setup'}`);
+    console.log(
+      `      Email         : ${
+        mailApiConfigured()
+          ? `mail API ${db.settings.mailApi.url}`
+          : smtpConfigured()
+            ? `SMTP ${s.host}:${s.port}${s.secure ? ' (SSL/TLS)' : ''} from ${s.fromEmail}`
+            : 'not set up yet — add it in /admin → Setup'
+      }`
+    );
     if (!process.env.ADMIN_PASSWORD) console.log('      ! Admin password is the default "diwali2026" — set ADMIN_PASSWORD to change it.');
     if (process.env.RENDER && !USE_REDIS)
       console.log('      ! Render free disks are wiped on restart — set the UPSTASH_REDIS_REST_* variables to keep votes safe.');
