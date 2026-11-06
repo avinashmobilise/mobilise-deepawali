@@ -1,0 +1,14 @@
+{
+  "name": "mobilise-diwali-utsav",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mobilise Diwali Utsav 2026: Best Desk and Best Dress voting web app (mobile + desktop)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
