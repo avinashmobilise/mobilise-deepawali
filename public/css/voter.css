@@ -484,3 +484,78 @@ select.mt-in {
     grid-column: auto;
   }
 }
+
+/* v4: members are picked from the employee master (DW.Combo) */
+.mt-pick {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.mt-pick .combo {
+  width: 100%;
+}
+.mt-pick.bad .combo-btn {
+  border-color: rgba(255, 107, 129, 0.85);
+  box-shadow: 0 0 0 3px rgba(255, 107, 129, 0.18);
+}
+.mt-static,
+.mt-email-ro {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.mt-static {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text);
+}
+.mt-email-ro {
+  display: block;
+  line-height: 44px;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--muted);
+}
+.mt-email-ro.empty {
+  color: var(--faint);
+  font-style: italic;
+  font-weight: 500;
+}
+.mt-row:focus-within {
+  position: relative;
+  z-index: 3; /* keep an open picker above the rows below it */
+}
+.mt-paste-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.mt-paste-note:empty {
+  display: none;
+}
+/* the picker already shows name + email, so picker rows don't repeat the email */
+.mt-row.has-pick .mt-email {
+  display: none;
+}
+.mt-row.has-pick .mt-gender {
+  grid-column: 1 / -1;
+}
+@media (min-width: 760px) {
+  .mt-row.has-pick .mt-name {
+    grid-column: span 2;
+  }
+  .mt-row.has-pick .mt-gender {
+    grid-column: auto;
+  }
+}

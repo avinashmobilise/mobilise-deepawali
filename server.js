@@ -271,7 +271,7 @@ function migrate(d) {
     };
   });
 
-  ensureLeaders(d);
+  syncLeaders(d);
 
   // v2 ballots belong to an employee (voterId). v1 team ballots (teamId) are dropped.
   const employeeIds = new Set(d.employees.map((e) => e.id));
@@ -288,28 +288,23 @@ function migrate(d) {
   return d;
 }
 
-/** Every team leader must exist as an employee of the team they lead (so they can log in).
- *  setNames: also copy team.leaderName onto the employee. reuse: Map(email → old employee)
- *  so a leader re-created after an import keeps their old id (and gender). */
-function ensureLeaders(d, { setNames = false, reuse = null } = {}) {
+/** Leaders come from the employee master (v4): a leader who is in the master is moved into
+ *  the team they lead and the team shows their master name; a leader who is no longer in
+ *  the master is cleared from the team. Nobody is ever created here. */
+function syncLeaders(d) {
   for (const t of d.teams) {
-    if (!t.leaderEmail) continue;
-    let e = d.employees.find((x) => x.email === t.leaderEmail);
-    if (!e) {
-      const old = reuse ? reuse.get(t.leaderEmail) : null;
-      const takenIds = new Set(d.employees.map((x) => x.id));
-      e = {
-        id: old && !takenIds.has(old.id) ? old.id : newId('e'),
-        name: t.leaderName || (old && old.name) || t.leaderEmail.split('@')[0],
-        email: t.leaderEmail,
-        teamId: t.id,
-        gender: (old && old.gender) || '',
-      };
-      d.employees.push(e);
-    } else {
-      e.teamId = t.id;
-      if (setNames && t.leaderName) e.name = t.leaderName;
+    if (!t.leaderEmail) {
+      t.leaderName = '';
+      continue;
     }
+    const e = d.employees.find((x) => x.email === t.leaderEmail);
+    if (!e) {
+      t.leaderEmail = '';
+      t.leaderName = '';
+      continue;
+    }
+    e.teamId = t.id;
+    t.leaderName = e.name;
   }
 }
 
@@ -720,7 +715,13 @@ function teamPayload(team) {
       hasVoted: voted.has(e.id),
     }))
     .sort((a, b) => Number(b.isLeader) - Number(a.isLeader) || a.name.localeCompare(b.name));
-  return { team: { id: team.id, name: team.name }, canEdit: !!db.settings.leadersCanEdit, members };
+  // the employee master, for the leader's searchable picker
+  const teamName = new Map(db.teams.map((t) => [t.id, t.name]));
+  const directory = db.employees
+    .filter((e) => e.email)
+    .map((e) => ({ id: e.id, name: e.name, email: e.email, teamId: e.teamId || null, teamName: e.teamId ? teamName.get(e.teamId) || '' : '' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { team: { id: team.id, name: team.name }, canEdit: !!db.settings.leadersCanEdit, members, directory };
 }
 
 function meFor(voter) {
@@ -850,8 +851,10 @@ function importEmployees(rows, syncTeams) {
   }
   if (teams.length > 200) throw httpError(400, `The import has ${teams.length} teams — the limit is 200.`, 'IMPORT');
   const teamIdByName = new Map(teams.map((t) => [t.name.toLowerCase(), t.id]));
+  const newTeamIds = new Set(teams.map((t) => t.id));
 
-  // Employees (same email → same id; same name → same id when one side has no email)
+  // Employees (same email → same id; same name → same id when one side has no email).
+  // An EMPTY Team / Gender cell keeps what the person already had (e.g. set by their team leader).
   const oldByEmail = new Map(db.employees.filter((e) => e.email).map((e) => [e.email, e]));
   const oldByName = new Map();
   for (const e of db.employees) {
@@ -866,13 +869,19 @@ function importEmployees(rows, syncTeams) {
     if (!prev) prev = (oldByName.get(r.name.toLowerCase()) || []).find((e) => !used.has(e.id) && (!r.email || !e.email)) || null;
     const id = prev ? prev.id : newId('e');
     used.add(id);
-    return { id, name: r.name, email: r.email, teamId: r.team ? teamIdByName.get(r.team.toLowerCase()) || null : null, gender: r.gender };
+    const teamId = r.team
+      ? teamIdByName.get(r.team.toLowerCase()) || null
+      : prev && prev.teamId && newTeamIds.has(prev.teamId)
+        ? prev.teamId
+        : null;
+    const gender = r.gender || (prev ? prev.gender || '' : '');
+    return { id, name: r.name, email: r.email, teamId, gender };
   });
 
   db.teams = teams;
   db.employees = employees;
-  // team leaders missing from the import are put back into their team (keeping their old id)
-  ensureLeaders(db, { reuse: oldByEmail });
+  // leaders still in the master stay with (and in) their team; leaders no longer in it are cleared
+  syncLeaders(db);
   const keepIds = new Set(db.employees.map((e) => e.id));
   const keepEmails = new Set(db.employees.filter((e) => e.email).map((e) => e.email));
   db.ballots = db.ballots.filter((b) => keepIds.has(b.voterId));
@@ -1111,57 +1120,36 @@ async function handleApi(req, res, url) {
     if (!Array.isArray(b.members)) return send(res, 400, { code: 'INVALID', error: 'No members were sent.' });
     if (b.members.length > 200) return send(res, 400, { code: 'INVALID', error: 'A team can have at most 200 members.' });
 
-    const current = db.employees.filter((e) => e.teamId === team.id);
-    const currentById = new Map(current.map((e) => [e.id, e]));
+    // v4: members are PICKED from the employee master by id (email accepted as a fallback);
+    // leaders only choose who is in the team and their gender — names/emails come from the master.
+    const byId = new Map(db.employees.map((e) => [e.id, e]));
     const byEmail = new Map(db.employees.filter((e) => e.email).map((e) => [e.email, e]));
     const seen = new Set();
     const rows = [];
     for (let i = 0; i < b.members.length; i++) {
       const r = b.members[i] && typeof b.members[i] === 'object' ? b.members[i] : {};
       const row = i + 1;
-      const name = cleanText(r.name, 60);
-      const email = normEmail(r.email);
+      let emp = r.id != null && r.id !== '' ? byId.get(String(r.id)) : null;
+      if (!emp && (r.id == null || r.id === '') && r.email) emp = byEmail.get(normEmail(r.email)) || null;
+      if (!emp) {
+        const what = r.email ? normEmail(r.email) : r.name ? cleanText(r.name, 60) : 'This person';
+        return send(res, 400, { code: 'INVALID', error: `Row ${row}: ${what} is not in the employee master.`, row });
+      }
+      if (seen.has(emp.id)) return send(res, 400, { code: 'INVALID', error: `Row ${row}: ${emp.name} is in the list twice.`, row });
+      seen.add(emp.id);
       const gender = normGender(r.gender);
-      if (!name) return send(res, 400, { code: 'INVALID', error: `Row ${row}: the name is missing.`, row });
-      if (!validEmail(email)) return send(res, 400, { code: 'INVALID', error: `Row ${row} (${name}): please enter a valid email.`, row });
-      if (gender !== 'M' && gender !== 'F') return send(res, 400, { code: 'INVALID', error: `Row ${row} (${name}): please choose M or F.`, row });
-      if (seen.has(email)) return send(res, 400, { code: 'INVALID', error: `Row ${row}: ${email} is in the list twice.`, row });
-      seen.add(email);
-      let match = r.id != null && currentById.has(String(r.id)) ? currentById.get(String(r.id)) : null;
-      const owner = byEmail.get(email);
-      if (owner && (!match || owner.id !== match.id)) {
-        if (owner.teamId && owner.teamId !== team.id)
-          return send(res, 409, { code: 'TAKEN', error: `${email} is already in team ${teamNameOf(owner.teamId)}.`, row });
-        if (match) return send(res, 409, { code: 'TAKEN', error: `${email} already belongs to ${owner.name}.`, row });
-        match = owner; // same email already in this team, or an employee without a team who joins it
-      }
-      rows.push({ row, name, email, gender, match });
+      if (gender !== 'M' && gender !== 'F') return send(res, 400, { code: 'INVALID', error: `Row ${row} (${emp.name}): please choose M or F.`, row });
+      if (emp.teamId && emp.teamId !== team.id)
+        return send(res, 409, { code: 'TAKEN', error: `${emp.name} is already in team ${teamNameOf(emp.teamId)}.`, row });
+      rows.push({ row, emp, gender });
     }
+    if (!rows.some((x) => x.emp.id === voter.id)) return send(res, 400, { code: 'INVALID', error: "You can't remove yourself." });
 
-    const leaderRow = rows.find((x) => x.match && x.match.id === voter.id);
-    if (!leaderRow) return send(res, 400, { code: 'INVALID', error: "You can't remove yourself." });
-    if (leaderRow.email !== voter.email)
-      return send(res, 400, { code: 'INVALID', error: "You can't change your own email here. Please ask the organiser.", row: leaderRow.row });
-
-    const keepIds = new Set(rows.filter((x) => x.match).map((x) => x.match.id));
-    const removed = current.filter((e) => !keepIds.has(e.id));
-    const votedIds = new Set(db.ballots.map((x) => x.voterId));
-    const blocked = removed.find((e) => votedIds.has(e.id));
-    if (blocked)
-      return send(res, 409, { code: 'HAS_VOTED', error: `${blocked.name} has already voted and can't be removed. Ask the organiser.` });
-
-    // all checks passed: apply
-    const removedIds = new Set(removed.map((e) => e.id));
-    db.employees = db.employees.filter((e) => !removedIds.has(e.id));
-    for (const e of removed) if (e.email) otps.delete(e.email);
-    for (const x of rows) {
-      if (x.match) {
-        if (x.match.email && x.match.email !== x.email) otps.delete(x.match.email);
-        Object.assign(x.match, { name: x.name, email: x.email, gender: x.gender, teamId: team.id });
-      } else {
-        db.employees.push({ id: newId('e'), name: x.name, email: x.email, teamId: team.id, gender: x.gender });
-      }
-    }
+    // all checks passed: apply. People left out just leave the team (they stay in the master,
+    // keep their login and keep any votes they already cast).
+    const keepIds = new Set(rows.map((x) => x.emp.id));
+    for (const e of db.employees) if (e.teamId === team.id && !keepIds.has(e.id)) e.teamId = null;
+    for (const x of rows) Object.assign(x.emp, { teamId: team.id, gender: x.gender });
     await mustSave();
     console.log(`  ✓ ${voter.name} saved team ${team.name} (${rows.length} members)`);
     return send(res, 200, teamPayload(team));
@@ -1291,13 +1279,16 @@ async function handleApi(req, res, url) {
         if (!name) return send(res, 400, { error: 'Every team needs a name.' });
         if (names.has(name.toLowerCase())) return send(res, 400, { error: `Two teams are called “${name}”.` });
         names.add(name.toLowerCase());
-        const leaderName = cleanText(t.leaderName, 80);
         const leaderEmail = normEmail(t.leaderEmail);
+        let leaderName = '';
         if (leaderEmail) {
           if (!validEmail(leaderEmail)) return send(res, 400, { error: `The leader email of “${name}” is not a valid address.` });
           if (leaders.has(leaderEmail))
             return send(res, 400, { error: `${leaderEmail} is the leader of both “${leaders.get(leaderEmail)}” and “${name}”. One person can lead one team.` });
+          const emp = db.employees.find((e) => e.email === leaderEmail);
+          if (!emp) return send(res, 400, { error: `${leaderEmail} is not in the employee master. Import it in Setup → Employees first.` });
           leaders.set(leaderEmail, name);
+          leaderName = emp.name;
         }
         const existing = t.id ? db.teams.find((x) => x.id === t.id) : null;
         next.push({ id: existing ? existing.id : newId('t'), name, leaderName, leaderEmail });
@@ -1305,7 +1296,7 @@ async function handleApi(req, res, url) {
       const keep = new Set(next.map((t) => t.id));
       for (const e of db.employees) if (e.teamId && !keep.has(e.teamId)) e.teamId = null;
       db.teams = next;
-      ensureLeaders(db, { setNames: true }); // leaders become (or are moved into) their team's members
+      syncLeaders(db); // each leader (from the master) is moved into the team they lead
       await mustSave();
       return send(res, 200, adminData());
     }

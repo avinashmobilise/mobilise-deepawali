@@ -358,3 +358,69 @@
     margin-left: 0;
   }
 }
+
+/* ---------- v4: leader picked from the employee master ---------- */
+.team-rows-head.v4,
+.team-row.v4 {
+  display: grid;
+  grid-template-columns: 28px minmax(140px, 1fr) minmax(240px, 1.8fr) 84px 36px 36px;
+  gap: 8px;
+  align-items: center;
+}
+.tr-leader-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.tr-leader {
+  flex: 1;
+  min-width: 0;
+}
+.tr-leader .combo {
+  width: 100%;
+}
+.tr-clear {
+  flex: none;
+  font-size: 18px;
+  line-height: 1;
+}
+.tr-clear[hidden] {
+  display: none;
+}
+@media (max-width: 900px) {
+  .team-rows-head.v4 {
+    display: none;
+  }
+  .team-row.v4 {
+    grid-template-columns: 22px 1fr 36px 36px;
+    grid-template-areas:
+      'no name copy remove'
+      'no leader leader leader'
+      'no members members members';
+    row-gap: 6px;
+    padding: 10px 0 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .team-row.v4 .tr-no {
+    grid-area: no;
+    align-self: start;
+    padding-top: 12px;
+  }
+  .team-row.v4 .tr-name {
+    grid-area: name;
+  }
+  .team-row.v4 .tr-leader-wrap {
+    grid-area: leader;
+  }
+  .team-row.v4 .tr-members {
+    grid-area: members;
+    text-align: left;
+  }
+  .team-row.v4 [data-act='copy-leader'] {
+    grid-area: copy;
+  }
+  .team-row.v4 [data-act='remove-team'] {
+    grid-area: remove;
+  }
+}

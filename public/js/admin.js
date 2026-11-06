@@ -572,9 +572,9 @@ ${votersPanel()}
     return `
 <div class="setup-grid">
   <form class="panel span-2" id="empForm" novalidate>
-    <h2>Employees <span class="faint sm">(voters and Best Dress participants)</span></h2>
-    <p class="muted sm">Paste straight from Excel or Google Sheets, or from a CSV file. Use the columns <b>Name, Email, Team, Gender</b>; a header row is optional.<br>
-      Everyone with an email can log in and vote. Gender (M/F) puts them in Best Dress (Male) or (Female). Team is used for Best Desk, and nobody scores their own team.</p>
+    <h2>Employee master <span class="faint sm">(everyone who can vote or be picked)</span></h2>
+    <p class="muted sm">This is the company's <b>employee master</b>. Team leaders and the organiser can only pick people from this list. Paste straight from Excel or Google Sheets, or from a CSV file. Columns: <b>Name, Email</b>; <b>Team</b> and <b>Gender</b> are optional. A header row is optional.<br>
+      Everyone with an email can log in and vote. Leave Team and Gender empty to let the team leaders set them: an empty cell keeps what a leader already chose. Gender (M/F) puts someone in Best Dress (Male) or (Female).</p>
     <p class="emp-current">${
       emps.length
         ? `Saved now: <b>${emps.length}</b> employees · ${withEmail} with email · ${male} male · ${female} female · ${plural(d.teams.length, 'team', 'teams')}. The box below shows this list. Edit it, or paste a new one.`
@@ -590,7 +590,7 @@ ${votersPanel()}
     <ul class="problems" id="empProblems" hidden></ul>
     <ul class="problems notes" id="empNotes" hidden></ul>
     <label class="switch"><input type="checkbox" name="syncTeams"><span class="sw" aria-hidden="true"></span>Replace the Best Desk team list with the teams from this import</label>
-    <p class="import-warning">⚠️ <b>Saving replaces the WHOLE employee list</b>, including the members that team leaders added themselves in “Manage my team”. Anyone missing from the new list is removed and loses their votes. People keep their votes as long as their email stays the same. To add a few people, edit the list in the box above (it already holds everyone saved now) instead of pasting an old file.</p>
+    <p class="import-warning">⚠️ <b>Saving replaces the whole employee master.</b> Anyone missing from the new list is removed and loses their votes. People keep their votes as long as their email stays the same. Empty Team / Gender cells keep the team and gender that team leaders set in “Manage my team”. To add a few people, edit the list in the box above (it already holds everyone saved now).</p>
     <button class="btn btn-gold sm" type="submit" id="empSave">Save employees</button>
   </form>
 
@@ -952,32 +952,88 @@ ${votersPanel()}
   const leaderEmails = () => new Set(A.data.teams.map((t) => String(t.leaderEmail || '').toLowerCase()).filter(Boolean));
   function leaderMessage(t) {
     const first = String(t.leaderName || '').trim().split(/\s+/)[0] || String(t.leaderEmail || '').split('@')[0] || 'there';
-    return `Namaste ${first}! 🪔 Please add your team members for ${A.data.settings.eventTitle}: open ${publicBase()}/, log in with ${t.leaderEmail} (you'll get a code by email) and tap 'Manage my team'. Add each person's name, email and gender.`;
+    return `Namaste ${first}! 🪔 Please add your team members for ${A.data.settings.eventTitle}: open ${publicBase()}/, log in with ${t.leaderEmail} (you'll get a code by email) and tap 'Manage my team'. Pick each person from the employee list and set their gender.`;
   }
+
+  /* Leaders are PICKED from the employee master (people with an email). */
+  const masterPeople = () =>
+    employees()
+      .filter((e) => e.email)
+      .slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const empById = (id) => employees().find((e) => String(e.id) === String(id));
+  const empByEmail = (email) => {
+    const em = String(email || '').toLowerCase();
+    return em ? employees().find((e) => String(e.email || '').toLowerCase() === em) : null;
+  };
 
   function teamRow(t, i) {
     const members = t.members || 0;
     const canCopy = !!(t.id && t.leaderEmail);
-    return `<div class="team-row v3" data-team-id="${esc(t.id || '')}">
+    return `<div class="team-row v4" data-team-id="${esc(t.id || '')}">
   <span class="tr-no">${i + 1}</span>
   <input class="tr-name" value="${esc(t.name || '')}" maxlength="40" aria-label="Team name" placeholder="Team name">
-  <input class="tr-lname" value="${esc(t.leaderName || '')}" maxlength="60" aria-label="Leader name" placeholder="Leader name" autocomplete="off">
-  <input class="tr-lemail" type="email" value="${esc(t.leaderEmail || '')}" maxlength="254" aria-label="Leader email" placeholder="leader@mobilise.co.in" autocomplete="off" spellcheck="false">
+  <div class="tr-leader-wrap"><div class="tr-leader" data-leader-email="${esc(String(t.leaderEmail || '').toLowerCase())}"></div>
+    <button class="icon-btn sm tr-clear" type="button" data-act="clear-leader" title="No leader" aria-label="Remove the leader of ${esc(t.name || 'this team')}">×</button></div>
   <span class="tr-members" title="People in this team">${t.id ? plural(members, 'person', 'people') : 'new'}</span>
-  <button class="icon-btn sm" type="button" data-act="copy-leader" title="${canCopy ? 'Copy message for leader' : 'Save a leader email first'}" aria-label="Copy message for the leader of ${esc(t.name || 'this team')}" ${canCopy ? '' : 'disabled'}>${ICONS.copy}</button>
+  <button class="icon-btn sm" type="button" data-act="copy-leader" title="${canCopy ? 'Copy message for leader' : 'Pick a leader and save first'}" aria-label="Copy message for the leader of ${esc(t.name || 'this team')}" ${canCopy ? '' : 'disabled'}>${ICONS.copy}</button>
   <button class="icon-btn sm danger" type="button" data-act="remove-team" title="Remove team" aria-label="Remove team">${ICONS.trash}</button>
 </div>`;
   }
+
+  /** Items for one row's leader picker: people already leading ANOTHER row are disabled. */
+  function leaderItems(forRow) {
+    const takenBy = new Map();
+    for (const r of $$('.team-row', $('#teamRows'))) {
+      if (r === forRow || !r._combo || r._combo.value == null) continue;
+      takenBy.set(String(r._combo.value), $('.tr-name', r).value.trim() || 'another team');
+    }
+    return masterPeople().map((e) => {
+      const lead = takenBy.get(String(e.id));
+      return {
+        id: e.id,
+        label: e.name,
+        sub: e.email,
+        disabled: !!lead,
+        hint: lead ? `leads ${lead}` : e.teamName ? `in ${e.teamName}` : '',
+      };
+    });
+  }
+  function refreshLeaderPickers() {
+    for (const r of $$('.team-row', $('#teamRows'))) if (r._combo) r._combo.setItems(leaderItems(r));
+  }
+  function syncClear(row) {
+    const btn = $('.tr-clear', row);
+    if (btn) btn.hidden = !(row._combo && row._combo.value != null);
+  }
+  function mountLeader(row) {
+    const box = $('.tr-leader', row);
+    if (!box || !window.DW.Combo) return;
+    const current = empByEmail(box.dataset.leaderEmail);
+    row._combo = window.DW.Combo.create(box, {
+      items: [],
+      value: current ? current.id : null,
+      placeholder: 'Pick the leader: search name or email…',
+      onChange: () => {
+        syncClear(row);
+        refreshLeaderPickers();
+      },
+    });
+    syncClear(row);
+  }
+  const pickedLeader = (row) => (row && row._combo && row._combo.value != null ? empById(row._combo.value) : null);
 
   function teamsTab() {
     const d = A.data;
     const general = publicBase() + '/';
     const canEdit = d.settings.leadersCanEdit !== false;
     const withLeader = d.teams.filter((t) => t.leaderEmail).length;
+    const noMaster = !masterPeople().length;
     return `
 <div class="panel">
   <h2>Teams <span class="faint sm">(Best Desk entries)</span></h2>
-  <p class="muted sm">Add each team's name and its <b>leader</b>. The leader logs in with their own email, taps <b>Manage my team</b> and adds the members: name, email and gender. Members can then log in and vote like everyone else.</p>
+  <p class="muted sm">Add each team's name and pick its <b>leader</b> from the employee master. The leader logs in with their own email, taps <b>Manage my team</b> and picks the members from the same list, with their gender. Members can then log in and vote like everyone else.</p>
+  ${noMaster ? `<p class="import-warning">Import the employee master in <a href="#" data-goto="setup">Setup → Employees</a> first, then pick the leaders here.</p>` : ''}
   <div class="share-row"><span class="faint">Voting link for everyone</span><code>${esc(general)}</code>
     <button class="btn btn-ghost sm" type="button" data-act="copy" data-text="${esc(general)}">${ICONS.copy} Copy link</button>
     <button class="btn btn-ghost sm" type="button" data-act="copy" data-text="${esc(shareMessage())}">${ICONS.copy} Copy WhatsApp message</button>
@@ -987,7 +1043,7 @@ ${votersPanel()}
     <p class="form-note">Switch this off when voting starts to freeze the team lists.</p>
   </div>
   <form id="teamsForm" novalidate>
-    <div class="team-rows-head v3"><span>#</span><span>Team name</span><span>Leader name</span><span>Leader email</span><span>Members</span><span></span><span></span></div>
+    <div class="team-rows-head v4"><span>#</span><span>Team name</span><span>Leader (from the employee master)</span><span>Members</span><span></span><span></span></div>
     <div class="team-rows" id="teamRows">${d.teams.map(teamRow).join('')}</div>
     <div class="row-btns">
       <button class="btn btn-ghost sm" type="button" data-act="add-team">${ICONS.plus} Add team</button>
@@ -1001,33 +1057,32 @@ ${votersPanel()}
 
   function bindTeams() {
     const form = $('#teamsForm');
+    $$('.team-row', form).forEach(mountLeader);
+    refreshLeaderPickers();
     form.addEventListener('input', (e) => {
       if (e.target.classList.contains('is-bad')) e.target.classList.remove('is-bad');
+      if (e.target.classList.contains('tr-name')) refreshLeaderPickers(); // hints say "leads <team name>"
     });
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const rows = $$('.team-row', form);
-      const teams = rows.map((r) => ({
-        id: r.dataset.teamId || undefined,
-        name: $('.tr-name', r).value.trim(),
-        leaderName: $('.tr-lname', r).value.trim(),
-        leaderEmail: $('.tr-lemail', r).value.trim().toLowerCase(),
-      }));
+      const teams = rows.map((r) => {
+        const p = pickedLeader(r);
+        return {
+          id: r.dataset.teamId || undefined,
+          name: $('.tr-name', r).value.trim(),
+          leaderName: p ? p.name : '',
+          leaderEmail: p ? String(p.email).toLowerCase() : '',
+        };
+      });
       if (teams.some((t) => !t.name)) return toast('Every team needs a name.', true);
       const leaderOf = new Map();
       for (let i = 0; i < teams.length; i++) {
         const t = teams[i];
         if (!t.leaderEmail) continue;
-        const input = $('.tr-lemail', rows[i]);
-        if (!EMAIL_RE.test(t.leaderEmail)) {
-          input.classList.add('is-bad');
-          input.focus();
-          return toast(`Team ${i + 1} (${t.name}): “${t.leaderEmail}” is not a valid email.`, true);
-        }
         if (leaderOf.has(t.leaderEmail)) {
-          input.classList.add('is-bad');
-          input.focus();
-          return toast(`${t.leaderEmail} is the leader of two teams: ${leaderOf.get(t.leaderEmail)} and ${t.name}.`, true);
+          rows[i]._combo.focus();
+          return toast(`${t.leaderName} is picked as the leader of two teams: ${leaderOf.get(t.leaderEmail)} and ${t.name}.`, true);
         }
         leaderOf.set(t.leaderEmail, t.name);
       }
@@ -1129,28 +1184,38 @@ ${votersPanel()}
       } else if (act === 'copy') await copy(el.dataset.text, 'Copied');
       else if (act === 'copy-leader') {
         const t = A.data.teams.find((x) => x.id === (row && row.dataset.teamId));
-        if (!t || !t.leaderEmail) return toast('Add the leader email and save the teams first.', true);
+        if (!t || !t.leaderEmail) return toast('Pick the leader and save the teams first.', true);
+        const p = pickedLeader(row);
         const changed =
-          $('.tr-name', row).value.trim() !== t.name ||
-          $('.tr-lname', row).value.trim() !== (t.leaderName || '') ||
-          $('.tr-lemail', row).value.trim().toLowerCase() !== String(t.leaderEmail).toLowerCase();
+          $('.tr-name', row).value.trim() !== t.name || String((p && p.email) || '').toLowerCase() !== String(t.leaderEmail).toLowerCase();
         if (changed) return toast('Save the teams first, then copy the message.', true);
         await copy(leaderMessage(t), `Message for ${t.leaderName || t.leaderEmail} copied: send it on WhatsApp`);
+      } else if (act === 'clear-leader') {
+        if (row && row._combo) {
+          row._combo.value = null;
+          syncClear(row);
+          refreshLeaderPickers();
+          toast('Leader removed. Click “Save teams” to confirm.');
+        }
       } else if (act === 'copy-leaders') {
         const list = A.data.teams.filter((t) => t.leaderEmail);
-        if (!list.length) return toast('No team has a leader yet. Add leader emails and save first.', true);
+        if (!list.length) return toast('No team has a leader yet. Pick the leaders and save first.', true);
         await copy(list.map((t) => `*${t.name}*\n${leaderMessage(t)}`).join('\n\n'), `${plural(list.length, 'leader message', 'leader messages')} copied`);
       } else if (act === 'add-team') {
         const rows = $('#teamRows');
         const n = rows.children.length;
         rows.insertAdjacentHTML('beforeend', teamRow({ name: `Team ${n + 1}` }, n));
+        mountLeader(rows.lastElementChild);
+        refreshLeaderPickers();
         const input = rows.lastElementChild.querySelector('.tr-name');
         input.focus();
         input.select();
       } else if (act === 'remove-team') {
         const rows = $('#teamRows');
         if (rows.children.length <= 2) return toast('You need at least 2 teams.', true);
+        if (row._combo) row._combo.destroy();
         row.remove();
+        refreshLeaderPickers();
         $$('.tr-no', rows).forEach((x, i) => (x.textContent = i + 1));
         toast('Team removed. Click “Save teams” to confirm.');
       }
