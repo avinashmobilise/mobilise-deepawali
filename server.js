@@ -1022,6 +1022,11 @@ async function handleApi(req, res, url) {
     const emp = db.employees.find((e) => e.email === email);
     if (!emp)
       return send(res, 404, { code: 'NOT_FOUND', error: "This email isn't on the employee list. Please check it or ask the organiser." });
+    // The organiser already gave this person a code by hand (email not arriving): skip the email
+    // and keep that code, so the person can go straight to the code screen.
+    const handed = otps.get(email);
+    if (handed && handed.admin && handed.exp > Date.now())
+      return send(res, 200, { ok: true, email, expiresInSec: Math.ceil((handed.exp - Date.now()) / 1000), resendInSec: OTP_RESEND_MS / 1000, viaOrganiser: true });
     const sends = recent(otpSends, email, OTP_EMAIL_WINDOW_MS);
     const last = sends[sends.length - 1];
     if (last && Date.now() - last < OTP_RESEND_MS) {
@@ -1272,6 +1277,19 @@ async function handleApi(req, res, url) {
       await mustSave();
       console.log(`  ✓ Imported ${db.employees.length} employees, ${db.teams.length} teams`);
       return send(res, 200, adminData());
+    }
+
+    // Organiser hands out a login code (when the email doesn't arrive). Valid 10 minutes;
+    // replaces any emailed code, and a later "Send login code" keeps this one instead of emailing.
+    if (m === 'POST' && p === '/api/admin/otp') {
+      const b = await readJson(req);
+      const emp = db.employees.find((e) => e.id === b.id);
+      if (!emp) return send(res, 404, { error: 'That employee no longer exists. Please reload the page.' });
+      if (!emp.email) return send(res, 400, { error: `${emp.name} has no email yet. Add their email first, then get a code.` });
+      const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      otps.set(emp.email, { hash: otpHash(emp.email, code), exp: Date.now() + OTP_TTL_MS, tries: 0, admin: true });
+      console.log(`  → Organiser generated a login code for ${emp.name}`);
+      return send(res, 200, { ok: true, code, name: emp.name, email: emp.email, expiresInSec: OTP_TTL_MS / 1000 });
     }
 
     // Organiser fixes one person: name, email (e.g. add a missing Gmail), gender or team.

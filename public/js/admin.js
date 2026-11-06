@@ -1138,6 +1138,7 @@ ${votersPanel()}
   <label class="mf mf-team"><span class="sr-only">Team</span><select name="teamId" data-orig="${esc(teamId)}">
     <option value=""${teamId ? '' : ' selected'}>No team</option>${teams.map((t) => `<option value="${esc(t.id)}"${t.id === teamId ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}</select></label>
   <button class="btn btn-gold sm msave" type="button" data-act="msave" disabled>Save</button>
+  ${e.email ? `<button class="btn btn-ghost sm mcode" type="button" data-act="mcode" title="Email not arriving? Get a login code to tell this person">${ICONS.lock} Login code</button>` : ''}
   <p class="mrow-err" role="alert"></p>
 </div>`;
   }
@@ -1244,6 +1245,28 @@ ${votersPanel()}
     if (err) err.textContent = '';
   }
 
+  /** Email not arriving? Generate a login code the organiser can read out / WhatsApp. */
+  function handOutCode(id, btn) {
+    busy(btn, async () => {
+      const r = await api('/api/admin/otp', { method: 'POST', body: { id } });
+      const mins = Math.round((r.expiresInSec || 600) / 60);
+      const msg = `Diwali Utsav login code for ${r.email}: ${r.code} (valid ${mins} minutes). Open the app, enter ${r.email}, tap "Send login code", then type this code.`;
+      const s = sheet(
+        `<h2 class="sheet-title">Login code for ${esc(r.name)}</h2>
+<p class="muted">${esc(r.email)} · valid for ${mins} minutes</p>
+<p class="otp-big" aria-label="Login code">${esc(r.code.slice(0, 3))} ${esc(r.code.slice(3))}</p>
+<ol class="otp-steps muted sm">
+  <li>Open the app and enter <b>${esc(r.email)}</b>.</li>
+  <li>Tap <b>Send login code</b>. No email is needed: the app goes straight to the code screen.</li>
+  <li>Type this code. Any code emailed earlier no longer works.</li>
+</ol>
+<div class="sheet-actions"><button class="btn btn-ghost" type="button" data-close>Close</button><button class="btn btn-gold" type="button" id="copyCode">Copy message</button></div>`,
+        'Login code'
+      );
+      s.el.querySelector('#copyCode').addEventListener('click', () => copy(msg, 'Code copied — send it to them'));
+    });
+  }
+
   async function saveMemberRow(row) {
     const changes = memberChanges(row);
     if (!Object.keys(changes).length) return;
@@ -1302,6 +1325,13 @@ ${votersPanel()}
         e.stopPropagation(); // handled here, not by the global click handler
         const row = save.closest('.mrow');
         if (row) saveMemberRow(row);
+        return;
+      }
+      const codeBtn = e.target.closest('[data-act="mcode"]');
+      if (codeBtn) {
+        e.stopPropagation();
+        const row = codeBtn.closest('.mrow');
+        if (row) handOutCode(row.dataset.emp, codeBtn);
       }
     });
     const onEdit = (e) => {

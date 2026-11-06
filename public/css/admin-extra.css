@@ -637,3 +637,36 @@
     grid-column: 1 / -1;
   }
 }
+
+/* Members: hand out a login code when the email doesn't arrive */
+.mrow .mcode {
+  grid-column: 4 / -1;
+  justify-self: end;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+.mrow .mcode .ic {
+  width: 14px;
+  height: 14px;
+}
+.otp-big {
+  margin: 16px 0 6px;
+  text-align: center;
+  font-size: 46px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: var(--gold);
+  font-variant-numeric: tabular-nums;
+}
+.otp-steps {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+@media (max-width: 760px) {
+  .mrow .mcode {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+}
