@@ -457,9 +457,25 @@ const mailApiConfigured = () => !!(db.settings.mailApi.url && db.settings.mailAp
 const emailConfigured = () => mailApiConfigured() || smtpConfigured();
 const emailVia = () => (mailApiConfigured() ? 'api' : smtpConfigured() ? 'smtp' : 'none');
 
+/** Make text safe for mail queues whose DB columns are not utf8mb4 (or even latin1):
+ *  every non-ASCII character in the HTML becomes a numeric entity (✅ → &#9989;), which mail
+ *  clients render identically; the plain-text subject is reduced to ASCII. */
+const htmlToAscii = (html) => String(html).replace(/[^\x00-\x7F]/gu, (ch) => `&#${ch.codePointAt(0)};`);
+const subjectToAscii = (s) =>
+  String(s)
+    .replace(/[–—·]/g, '-')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
 /** Send through the HTTPS mail API. Expects JSON {success, message} back. */
 async function sendViaApi({ to, subject, html }) {
   const a = db.settings.mailApi;
+  html = htmlToAscii(html);
+  subject = subjectToAscii(subject) || 'Your login code';
   let res;
   try {
     res = await fetch(a.url, {
