@@ -76,6 +76,12 @@ The free service goes to sleep after 15 minutes without visitors. The first visi
    - The header row is optional.
    - Gender `M`/`F` decides the Best Dress (Male)/(Female) lists. Team decides which desk a person cannot score.
    - Leave *"Replace the Best Desk team list"* ticked so that the teams come from the sheet.
+   **Or let team leaders fill in their own teams** (the faster way):
+   - **Teams tab:** for each team, enter only the team name, leader name and leader email, then click Save teams.
+   - **Copy message for leader:** send each leader the WhatsApp text.
+   - The leader logs in with their email, then opens **Manage my team**. There they add each member's name, email and gender (they can also paste from Excel).
+   - When voting starts, switch off **"Team leaders can add and edit their members"** to freeze the lists.
+   - Note: saving an Employees import replaces the whole list, including members added by leaders.
 3. **Setup:** check the owner greeting and upload Ashish Sharma's photo.
 4. Share **one link** with everyone. Each person enters their office email and then the code from their inbox.
 5. **Live results:**

@@ -107,3 +107,380 @@
 .hub-hello .h1 {
   overflow-wrap: anywhere;
 }
+
+/* ================================================================ */
+/* Team leaders                                                     */
+/* ================================================================ */
+/* hub card */
+.leader-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  margin: 0 0 14px;
+  padding: 16px;
+  border-radius: 22px;
+  background: linear-gradient(160deg, rgba(255, 201, 74, 0.17), rgba(255, 138, 31, 0.05));
+  border: 1px solid rgba(255, 201, 74, 0.5);
+  box-shadow: 0 0 44px -20px rgba(255, 170, 40, 0.7);
+}
+.lc-crown {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 17px;
+  background: linear-gradient(180deg, rgba(255, 201, 74, 0.38), rgba(255, 138, 31, 0.12));
+  font-size: 28px;
+  line-height: 1;
+}
+.lc-body {
+  min-width: 0;
+}
+.leader-card h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.leader-card p {
+  margin: 4px 0 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.leader-card .lc-meta {
+  color: var(--gold-hi);
+  font-weight: 700;
+  font-size: 13px;
+}
+.leader-card .lc-meta:empty {
+  display: none;
+}
+.leader-card .btn {
+  margin-top: 12px;
+}
+
+/* "Manage my team" page */
+.myteam {
+  padding-bottom: calc(120px + var(--safe-bottom));
+}
+/* .screen's entry animation keeps a transform applied (fill-mode both), which turns the screen into
+   the containing block of position:fixed children — the Save bar would then sit at the end of the
+   page instead of the bottom of the viewport. Only fill backwards so nothing lingers afterwards. */
+.screen.myteam {
+  animation-fill-mode: backwards;
+}
+.mt-loading {
+  min-height: 50vh;
+}
+.mt-lead {
+  margin: 4px 0 14px;
+  max-width: 62ch;
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+.mt-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 201, 74, 0.1);
+  border: 1px solid rgba(255, 201, 74, 0.38);
+  color: var(--gold-hi);
+  font-size: 14px;
+  font-weight: 600;
+}
+.mt-notice .ic {
+  width: 18px;
+  height: 18px;
+}
+.mt-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.mt-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.mt-pill.warn {
+  background: rgba(255, 201, 74, 0.14);
+  border-color: rgba(255, 201, 74, 0.42);
+  color: var(--gold-hi);
+}
+.mt-pill.unsaved {
+  background: rgba(229, 38, 125, 0.16);
+  border-color: rgba(229, 38, 125, 0.48);
+  color: var(--rani-soft);
+}
+.mt-errors {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 107, 129, 0.12);
+  border: 1px solid rgba(255, 107, 129, 0.5);
+  color: #ffc2cc;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.mt-errors:empty {
+  display: none;
+}
+.mt-errors ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.mt-errors .link-btn {
+  margin-top: 4px;
+}
+.mt-head {
+  display: none;
+}
+.mt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.mt-empty {
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  text-align: center;
+}
+/* phone: compact card — number + tags on top, name, then email + gender */
+.mt-row {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  grid-template-areas: 'no side' 'fields fields';
+  align-items: center;
+  gap: 8px 10px;
+  padding: 12px;
+  border-radius: 18px;
+  background: rgba(8, 30, 70, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.mt-row.is-leader {
+  border-color: rgba(255, 201, 74, 0.45);
+  background: linear-gradient(180deg, rgba(255, 201, 74, 0.09), rgba(8, 30, 70, 0.72));
+}
+.mt-row.has-error {
+  border-color: rgba(255, 107, 129, 0.75);
+  box-shadow: 0 0 0 2px rgba(255, 107, 129, 0.22);
+}
+.mt-no {
+  grid-area: no;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.mt-fields {
+  grid-area: fields;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  gap: 8px;
+  min-width: 0;
+}
+.mt-name {
+  grid-column: 1 / -1;
+}
+.mt-field {
+  min-width: 0;
+}
+.mt-in {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  font: 600 15px var(--font);
+}
+select.mt-in {
+  padding: 0 8px;
+  cursor: pointer;
+}
+.mt-in::placeholder {
+  color: rgba(255, 245, 225, 0.35);
+  font-weight: 500;
+}
+.mt-in:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 201, 74, 0.18);
+}
+.mt-in[readonly],
+.mt-in:disabled {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  cursor: default;
+}
+.mt-in.bad {
+  border-color: rgba(255, 107, 129, 0.85);
+  box-shadow: 0 0 0 3px rgba(255, 107, 129, 0.18);
+}
+.mt-side {
+  grid-area: side;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+}
+.mt-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.mt-tag .ic {
+  width: 14px;
+  height: 14px;
+}
+.mt-tag.you {
+  background: rgba(255, 201, 74, 0.16);
+  color: var(--gold);
+}
+.mt-tag.voted {
+  background: rgba(110, 231, 183, 0.14);
+  color: var(--ok);
+}
+.mt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.mt-paste {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 201, 74, 0.38);
+}
+.mt-paste summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--gold);
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+.mt-paste summary::-webkit-details-marker {
+  display: none;
+}
+.mt-paste summary .ic {
+  width: 16px;
+  height: 16px;
+}
+.mt-paste[open] summary {
+  margin-bottom: 8px;
+}
+.mt-paste p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+.mt-paste-in {
+  width: 100%;
+  min-height: 110px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font: 500 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.mt-paste-in:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 201, 74, 0.18);
+}
+.mt-paste-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.mt-foot {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  padding: 18px 16px calc(14px + var(--safe-bottom));
+  background: linear-gradient(180deg, rgba(0, 18, 46, 0), rgba(0, 18, 46, 0.94) 34%);
+}
+.mt-foot .btn {
+  flex: 1;
+  max-width: 420px;
+}
+@media (max-width: 380px) {
+  .mt-fields {
+    grid-template-columns: minmax(0, 1fr) 104px;
+  }
+}
+/* desktop: one grid row per member, with column headings */
+@media (min-width: 760px) {
+  .myteam {
+    max-width: 1000px;
+  }
+  .mt-head,
+  .mt-row {
+    grid-template-columns: 30px minmax(0, 1.15fr) minmax(0, 1.5fr) 132px 150px;
+    grid-template-areas: none;
+  }
+  .mt-head {
+    display: grid;
+    gap: 10px;
+    padding: 0 14px 6px;
+    color: var(--faint);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .mt-row {
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 14px;
+  }
+  .mt-no,
+  .mt-side {
+    grid-area: auto;
+  }
+  .mt-fields {
+    display: contents;
+  }
+  .mt-name {
+    grid-column: auto;
+  }
+}

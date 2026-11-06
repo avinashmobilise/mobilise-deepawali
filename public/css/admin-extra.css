@@ -269,3 +269,92 @@
   margin-top: 14px;
   font-size: 13.5px;
 }
+
+/* ---------- v3: team leaders ---------- */
+.team-rows-head.v3,
+.team-row.v3 {
+  grid-template-columns: 28px minmax(120px, 1.1fr) minmax(110px, 1fr) minmax(170px, 1.4fr) 84px 36px 36px;
+}
+.team-row input.is-bad {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(255, 107, 129, 0.18);
+}
+.leaders-rule {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 16px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 201, 74, 0.06);
+  border: 1px solid rgba(255, 201, 74, 0.22);
+}
+.leaders-rule .form-note {
+  margin: 0 0 0 54px;
+}
+.lead-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 201, 74, 0.16);
+  border: 1px solid rgba(255, 201, 74, 0.45);
+  color: var(--gold-hi);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+.import-warning {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 201, 74, 0.08);
+  border: 1px solid rgba(255, 201, 74, 0.38);
+  color: var(--gold-hi);
+  font-size: 13px;
+  line-height: 1.55;
+}
+@media (max-width: 900px) {
+  .team-rows-head.v3 {
+    display: none;
+  }
+  .team-row.v3 {
+    grid-template-columns: 22px 1fr 1fr 36px 36px;
+    grid-template-areas:
+      'no name name copy remove'
+      'no lname lname lname lname'
+      'no lemail lemail lemail lemail'
+      'no members members members members';
+    row-gap: 6px;
+    padding: 10px 0 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .team-row.v3 .tr-no {
+    grid-area: no;
+    align-self: start;
+    padding-top: 12px;
+  }
+  .team-row.v3 .tr-name {
+    grid-area: name;
+  }
+  .team-row.v3 .tr-lname {
+    grid-area: lname;
+  }
+  .team-row.v3 .tr-lemail {
+    grid-area: lemail;
+  }
+  .team-row.v3 .tr-members {
+    grid-area: members;
+    text-align: left;
+  }
+  .team-row.v3 [data-act='copy-leader'] {
+    grid-area: copy;
+  }
+  .team-row.v3 [data-act='remove-team'] {
+    grid-area: remove;
+  }
+  .leaders-rule .form-note {
+    margin-left: 0;
+  }
+}

@@ -160,7 +160,7 @@ function normaliseMailApi(a) {
 
 function defaultDb() {
   return {
-    version: 2,
+    version: 3,
     secret: crypto.randomBytes(32).toString('hex'),
     settings: {
       eventTitle: 'Diwali Utsav 2026',
@@ -168,8 +168,9 @@ function defaultDb() {
       owner: { name: 'Ashish Sharma', title: 'Founder & Managing Director', message: DEFAULT_OWNER_MESSAGE, photo: '' },
       smtp: defaultSmtp(),
       mailApi: normaliseMailApi(null),
+      leadersCanEdit: true, // team leaders may add/edit their own members
     },
-    teams: Array.from({ length: 10 }, (_, i) => ({ id: 't' + (i + 1), name: 'Team ' + (i + 1) })),
+    teams: Array.from({ length: 10 }, (_, i) => ({ id: 't' + (i + 1), name: 'Team ' + (i + 1), leaderName: '', leaderEmail: '' })),
     employees: [],
     competitions: COMPETITION_DEFAULTS.map((c) => ({ ...c })),
     ballots: [],
@@ -204,12 +205,20 @@ function migrate(d) {
     owner: Object.assign({}, def.settings.owner, old.owner && typeof old.owner === 'object' ? old.owner : {}),
     smtp: normaliseSmtp(Object.assign(defaultSmtp(), old.smtp && typeof old.smtp === 'object' ? old.smtp : {})),
     mailApi: normaliseMailApi(old.mailApi),
+    leadersCanEdit: old.leadersCanEdit == null ? true : !!old.leadersCanEdit,
   }; // v1 settings.requirePin is dropped here
 
   const seenTeams = new Set();
+  const seenLeaders = new Set();
   d.teams = (Array.isArray(d.teams) ? d.teams : def.teams)
     .filter((t) => t && t.name)
-    .map((t) => ({ id: String(t.id || newId('t')), name: cleanText(t.name, 40) })) // v1 team pins are dropped here
+    .map((t) => {
+      // v1 team pins are dropped here; v3 adds the team leader
+      let leaderEmail = normEmail(t.leaderEmail);
+      if (!validEmail(leaderEmail) || seenLeaders.has(leaderEmail)) leaderEmail = '';
+      if (leaderEmail) seenLeaders.add(leaderEmail);
+      return { id: String(t.id || newId('t')), name: cleanText(t.name, 40), leaderName: cleanText(t.leaderName, 80), leaderEmail };
+    })
     .filter((t) => t.name && !seenTeams.has(t.id) && seenTeams.add(t.id));
   const teamIds = new Set(d.teams.map((t) => t.id));
 
@@ -262,6 +271,8 @@ function migrate(d) {
     };
   });
 
+  ensureLeaders(d);
+
   // v2 ballots belong to an employee (voterId). v1 team ballots (teamId) are dropped.
   const employeeIds = new Set(d.employees.map((e) => e.id));
   d.ballots = (Array.isArray(d.ballots) ? d.ballots : []).filter(
@@ -273,9 +284,37 @@ function migrate(d) {
       b.scores &&
       typeof b.scores === 'object'
   );
-  d.version = 2;
+  d.version = 3;
   return d;
 }
+
+/** Every team leader must exist as an employee of the team they lead (so they can log in).
+ *  setNames: also copy team.leaderName onto the employee. reuse: Map(email → old employee)
+ *  so a leader re-created after an import keeps their old id (and gender). */
+function ensureLeaders(d, { setNames = false, reuse = null } = {}) {
+  for (const t of d.teams) {
+    if (!t.leaderEmail) continue;
+    let e = d.employees.find((x) => x.email === t.leaderEmail);
+    if (!e) {
+      const old = reuse ? reuse.get(t.leaderEmail) : null;
+      const takenIds = new Set(d.employees.map((x) => x.id));
+      e = {
+        id: old && !takenIds.has(old.id) ? old.id : newId('e'),
+        name: t.leaderName || (old && old.name) || t.leaderEmail.split('@')[0],
+        email: t.leaderEmail,
+        teamId: t.id,
+        gender: (old && old.gender) || '',
+      };
+      d.employees.push(e);
+    } else {
+      e.teamId = t.id;
+      if (setNames && t.leaderName) e.name = t.leaderName;
+    }
+  }
+}
+
+/** The team this employee leads (or null). */
+const leaderTeamOf = (emp) => (emp && emp.email ? db.teams.find((t) => t.leaderEmail && t.leaderEmail === emp.email) || null : null);
 
 /** One Upstash Redis REST call, e.g. ['SET', key, value]. Retries short network hiccups. */
 async function redis(command, attempts = 3) {
@@ -654,7 +693,35 @@ function publicState() {
   };
 }
 
-const voterView = (e) => ({ id: e.id, name: e.name, email: e.email, teamId: e.teamId, teamName: teamNameOf(e.teamId) });
+function voterView(e) {
+  const led = leaderTeamOf(e);
+  return {
+    id: e.id,
+    name: e.name,
+    email: e.email,
+    teamId: e.teamId,
+    teamName: teamNameOf(e.teamId),
+    gender: e.gender || '',
+    leaderOf: led ? { teamId: led.id, teamName: led.name } : null,
+  };
+}
+
+/** What a team leader sees on "Manage my team": leader first, then by name. */
+function teamPayload(team) {
+  const voted = new Set(db.ballots.map((b) => b.voterId));
+  const members = db.employees
+    .filter((e) => e.teamId === team.id)
+    .map((e) => ({
+      id: e.id,
+      name: e.name,
+      email: e.email,
+      gender: e.gender || '',
+      isLeader: !!team.leaderEmail && e.email === team.leaderEmail,
+      hasVoted: voted.has(e.id),
+    }))
+    .sort((a, b) => Number(b.isLeader) - Number(a.isLeader) || a.name.localeCompare(b.name));
+  return { team: { id: team.id, name: team.name }, canEdit: !!db.settings.leadersCanEdit, members };
+}
 
 function meFor(voter) {
   const ballots = {};
@@ -688,8 +755,15 @@ function adminData() {
         passSet: !!s.smtp.pass,
       },
       mailApi: { url: s.mailApi.url, keySet: !!s.mailApi.key },
+      leadersCanEdit: !!s.leadersCanEdit,
     },
-    teams: db.teams.map((t) => ({ id: t.id, name: t.name, members: members.get(t.id) || 0 })),
+    teams: db.teams.map((t) => ({
+      id: t.id,
+      name: t.name,
+      leaderName: t.leaderName || '',
+      leaderEmail: t.leaderEmail || '',
+      members: members.get(t.id) || 0,
+    })),
     employees: db.employees.map((e) => ({
       id: e.id,
       name: e.name,
@@ -697,6 +771,7 @@ function adminData() {
       teamId: e.teamId,
       teamName: e.teamId ? teamName.get(e.teamId) || '' : '',
       gender: e.gender,
+      isLeader: !!e.email && db.teams.some((t) => t.leaderEmail === e.email),
       voted: votedBy.get(e.id) || {},
     })),
     competitions: db.competitions.map((c) => ({
@@ -761,13 +836,14 @@ function importEmployees(rows, syncTeams) {
   if (syncTeams && importTeams.length) {
     teams = importTeams.map((name) => {
       const ex = existingByName.get(name.toLowerCase());
-      return { id: ex ? ex.id : newId('t'), name };
+      // keep the leader of a team that already existed under the same name
+      return { id: ex ? ex.id : newId('t'), name, leaderName: ex ? ex.leaderName || '' : '', leaderEmail: ex ? ex.leaderEmail || '' : '' };
     });
   } else {
-    teams = db.teams.map((t) => ({ id: t.id, name: t.name }));
+    teams = db.teams.map((t) => ({ ...t }));
     for (const name of importTeams)
       if (!existingByName.has(name.toLowerCase())) {
-        const t = { id: newId('t'), name };
+        const t = { id: newId('t'), name, leaderName: '', leaderEmail: '' };
         teams.push(t);
         existingByName.set(name.toLowerCase(), t);
       }
@@ -795,8 +871,12 @@ function importEmployees(rows, syncTeams) {
 
   db.teams = teams;
   db.employees = employees;
-  db.ballots = db.ballots.filter((b) => used.has(b.voterId));
-  for (const email of [...otps.keys()]) if (!seenEmail.has(email)) otps.delete(email);
+  // team leaders missing from the import are put back into their team (keeping their old id)
+  ensureLeaders(db, { reuse: oldByEmail });
+  const keepIds = new Set(db.employees.map((e) => e.id));
+  const keepEmails = new Set(db.employees.filter((e) => e.email).map((e) => e.email));
+  db.ballots = db.ballots.filter((b) => keepIds.has(b.voterId));
+  for (const email of [...otps.keys()]) if (!keepEmails.has(email)) otps.delete(email);
 }
 
 function csvCell(v) {
@@ -1018,6 +1098,75 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ok: true, ...meFor(voter) });
   }
 
+  // ---------- team leaders: manage their own members ----------
+  if (p === '/api/team' && (m === 'GET' || m === 'POST')) {
+    const voter = voterFromRequest(req);
+    if (!voter) return send(res, 401, { error: 'Please log in again.', code: 'AUTH' });
+    const team = leaderTeamOf(voter);
+    if (!team) return send(res, 403, { code: 'NOT_LEADER', error: "You're not a team leader." });
+    if (m === 'GET') return send(res, 200, teamPayload(team));
+
+    if (!db.settings.leadersCanEdit) return send(res, 403, { code: 'LOCKED', error: 'The organiser has locked the team lists.' });
+    const b = await readJson(req);
+    if (!Array.isArray(b.members)) return send(res, 400, { code: 'INVALID', error: 'No members were sent.' });
+    if (b.members.length > 200) return send(res, 400, { code: 'INVALID', error: 'A team can have at most 200 members.' });
+
+    const current = db.employees.filter((e) => e.teamId === team.id);
+    const currentById = new Map(current.map((e) => [e.id, e]));
+    const byEmail = new Map(db.employees.filter((e) => e.email).map((e) => [e.email, e]));
+    const seen = new Set();
+    const rows = [];
+    for (let i = 0; i < b.members.length; i++) {
+      const r = b.members[i] && typeof b.members[i] === 'object' ? b.members[i] : {};
+      const row = i + 1;
+      const name = cleanText(r.name, 60);
+      const email = normEmail(r.email);
+      const gender = normGender(r.gender);
+      if (!name) return send(res, 400, { code: 'INVALID', error: `Row ${row}: the name is missing.`, row });
+      if (!validEmail(email)) return send(res, 400, { code: 'INVALID', error: `Row ${row} (${name}): please enter a valid email.`, row });
+      if (gender !== 'M' && gender !== 'F') return send(res, 400, { code: 'INVALID', error: `Row ${row} (${name}): please choose M or F.`, row });
+      if (seen.has(email)) return send(res, 400, { code: 'INVALID', error: `Row ${row}: ${email} is in the list twice.`, row });
+      seen.add(email);
+      let match = r.id != null && currentById.has(String(r.id)) ? currentById.get(String(r.id)) : null;
+      const owner = byEmail.get(email);
+      if (owner && (!match || owner.id !== match.id)) {
+        if (owner.teamId && owner.teamId !== team.id)
+          return send(res, 409, { code: 'TAKEN', error: `${email} is already in team ${teamNameOf(owner.teamId)}.`, row });
+        if (match) return send(res, 409, { code: 'TAKEN', error: `${email} already belongs to ${owner.name}.`, row });
+        match = owner; // same email already in this team, or an employee without a team who joins it
+      }
+      rows.push({ row, name, email, gender, match });
+    }
+
+    const leaderRow = rows.find((x) => x.match && x.match.id === voter.id);
+    if (!leaderRow) return send(res, 400, { code: 'INVALID', error: "You can't remove yourself." });
+    if (leaderRow.email !== voter.email)
+      return send(res, 400, { code: 'INVALID', error: "You can't change your own email here. Please ask the organiser.", row: leaderRow.row });
+
+    const keepIds = new Set(rows.filter((x) => x.match).map((x) => x.match.id));
+    const removed = current.filter((e) => !keepIds.has(e.id));
+    const votedIds = new Set(db.ballots.map((x) => x.voterId));
+    const blocked = removed.find((e) => votedIds.has(e.id));
+    if (blocked)
+      return send(res, 409, { code: 'HAS_VOTED', error: `${blocked.name} has already voted and can't be removed. Ask the organiser.` });
+
+    // all checks passed: apply
+    const removedIds = new Set(removed.map((e) => e.id));
+    db.employees = db.employees.filter((e) => !removedIds.has(e.id));
+    for (const e of removed) if (e.email) otps.delete(e.email);
+    for (const x of rows) {
+      if (x.match) {
+        if (x.match.email && x.match.email !== x.email) otps.delete(x.match.email);
+        Object.assign(x.match, { name: x.name, email: x.email, gender: x.gender, teamId: team.id });
+      } else {
+        db.employees.push({ id: newId('e'), name: x.name, email: x.email, teamId: team.id, gender: x.gender });
+      }
+    }
+    await mustSave();
+    console.log(`  ✓ ${voter.name} saved team ${team.name} (${rows.length} members)`);
+    return send(res, 200, teamPayload(team));
+  }
+
   // ---------- organiser ----------
   if (m === 'POST' && p === '/api/admin/login') {
     const body = await readJson(req);
@@ -1048,6 +1197,7 @@ async function handleApi(req, res, url) {
         if (b.owner.title != null) s.owner.title = cleanText(b.owner.title, 80);
         if (b.owner.message != null) s.owner.message = cleanMultiline(b.owner.message, 600);
       }
+      if (b.leadersCanEdit != null) s.leadersCanEdit = !!b.leadersCanEdit;
       await mustSave();
       return send(res, 200, adminData());
     }
@@ -1134,18 +1284,28 @@ async function handleApi(req, res, url) {
       if (!Array.isArray(b.teams) || b.teams.length < 2 || b.teams.length > 200)
         return send(res, 400, { error: 'Please keep between 2 and 200 teams.' });
       const names = new Set();
+      const leaders = new Map();
       const next = [];
       for (const t of b.teams) {
         const name = cleanText(t && t.name, 40);
         if (!name) return send(res, 400, { error: 'Every team needs a name.' });
         if (names.has(name.toLowerCase())) return send(res, 400, { error: `Two teams are called “${name}”.` });
         names.add(name.toLowerCase());
+        const leaderName = cleanText(t.leaderName, 80);
+        const leaderEmail = normEmail(t.leaderEmail);
+        if (leaderEmail) {
+          if (!validEmail(leaderEmail)) return send(res, 400, { error: `The leader email of “${name}” is not a valid address.` });
+          if (leaders.has(leaderEmail))
+            return send(res, 400, { error: `${leaderEmail} is the leader of both “${leaders.get(leaderEmail)}” and “${name}”. One person can lead one team.` });
+          leaders.set(leaderEmail, name);
+        }
         const existing = t.id ? db.teams.find((x) => x.id === t.id) : null;
-        next.push({ id: existing ? existing.id : newId('t'), name });
+        next.push({ id: existing ? existing.id : newId('t'), name, leaderName, leaderEmail });
       }
       const keep = new Set(next.map((t) => t.id));
       for (const e of db.employees) if (e.teamId && !keep.has(e.teamId)) e.teamId = null;
       db.teams = next;
+      ensureLeaders(db, { setNames: true }); // leaders become (or are moved into) their team's members
       await mustSave();
       return send(res, 200, adminData());
     }
@@ -1277,7 +1437,9 @@ async function start() {
     for (const u of lan) console.log(`      Office network: ${u}`);
     console.log(`      Organiser     : http://localhost:${PORT}/admin`);
     console.log(`      Data stored in: ${USE_REDIS ? `Upstash Redis (key "${REDIS_KEY}")` : DB_FILE}`);
-    console.log(`      Teams         : ${db.teams.length}`);
+    console.log(
+      `      Teams         : ${db.teams.length} (${db.teams.filter((t) => t.leaderEmail).length} with a leader; leaders ${db.settings.leadersCanEdit ? 'can' : 'cannot'} edit members)`
+    );
     console.log(`      Employees     : ${db.employees.length} (${db.employees.filter((e) => e.email).length} can log in with email)`);
     console.log(
       `      Email         : ${

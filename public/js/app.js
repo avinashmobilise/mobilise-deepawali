@@ -245,6 +245,7 @@
     [/^#?\/?$/, 'landing', viewLanding],
     [/^#\/(?:login|team)$/, 'login', viewLogin],
     [/^#\/hub$/, 'hub', viewHub],
+    [/^#\/myteam$/, 'myteam', viewMyTeam],
     [/^#\/vote\/([\w-]+)$/, 'ballot', viewBallot],
     [/^#\/done\/([\w-]+)$/, 'done', viewDone],
     [/^#\/mine\/([\w-]+)$/, 'mine', viewMine],
@@ -572,6 +573,7 @@
     const comps = S.state.competitions;
     const done = comps.filter((c) => S.me.ballots[c.id]).length;
     const team = myTeamName();
+    const lead = S.me.voter.leaderOf || null;
     app.innerHTML = `
 <section class="screen hub">
   <header class="topbar">${brand('sm')}<div class="topbar-actions">${soundBtn()}<button class="chip-btn" type="button" id="logoutBtn">${IC_LOGOUT} Log out</button></div></header>
@@ -584,9 +586,11 @@
       <p><b>${done} of ${comps.length}</b> votes cast${done === comps.length ? ' · all done! 🎉' : ''}</p>
     </div>
   </div>
+  ${lead ? leaderCard(lead) : ''}
   <div class="comp-list">${comps.map(compCard).join('')}</div>
   ${comps.some((c) => c.published) ? `<a class="btn btn-ghost wide" href="#/results">${ICONS.trophy} See the winners</a>` : ''}
 </section>`;
+    if (lead) refreshTeamCount(lead);
     $('#logoutBtn').addEventListener('click', () => {
       const s = sheet(
         `<h2 class="sheet-title">Log out?</h2>
@@ -599,6 +603,485 @@
         logout('', '#/');
       });
     });
+  }
+
+  /* ================================================================ */
+  /* Team leaders: "Manage my team"                                    */
+  /* ================================================================ */
+  const TEAM_MAX = 200;
+  let teamCache = null; // { teamId, count, canEdit, at } from the last GET /api/team
+  const memberCount = (n) => `${n} member${n === 1 ? '' : 's'} on your team`;
+  function normGender(v) {
+    const s = String(v == null ? '' : v).trim();
+    if (/^(m|male|man|boy|gent|gents)$/i.test(s)) return 'M';
+    if (/^(f|female|woman|girl|lady|ladies)$/i.test(s)) return 'F';
+    return '';
+  }
+  const cleanName = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 60);
+  const leadTeamName = (lead) => lead.teamName || ((S.state.teams || []).find((t) => t.id === lead.teamId) || {}).name || 'your team';
+
+  function leaderCard(lead) {
+    const known = teamCache && teamCache.teamId === lead.teamId;
+    const locked = known && !teamCache.canEdit;
+    return `
+<article class="leader-card">
+  <div class="lc-crown" aria-hidden="true">👑</div>
+  <div class="lc-body">
+    <h2>You lead ${esc(leadTeamName(lead))}</h2>
+    <p class="muted">${locked ? 'The organiser has locked the team lists. You can still see your team.' : 'Add your team members so they can vote: name, email and gender.'}</p>
+    <p class="lc-meta" id="lcCount">${known ? esc(memberCount(teamCache.count)) : ''}</p>
+    <a class="btn btn-gold" href="#/myteam">${ICONS.teams} ${locked ? 'View my team' : 'Manage my team'}</a>
+  </div>
+</article>`;
+  }
+
+  /** Fill in the member count on the hub card (at most once a minute). */
+  async function refreshTeamCount(lead) {
+    if (teamCache && teamCache.teamId === lead.teamId && Date.now() - teamCache.at < 60000) return;
+    try {
+      const d = await api('/api/team');
+      teamCache = { teamId: d.team.id, count: (d.members || []).length, canEdit: !!d.canEdit, at: Date.now() };
+      const el = $('#lcCount');
+      if (el && S.view === 'hub') el.textContent = memberCount(teamCache.count);
+    } catch (e) {
+      /* the card works without the count */
+    }
+  }
+
+  /** One CSV / TSV / semicolon line, with simple "quoted, fields" support. */
+  function splitLine(line) {
+    const d = line.includes('\t') ? '\t' : line.includes(';') ? ';' : ',';
+    const out = [];
+    let cur = '';
+    let q = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (q) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else q = false;
+        } else cur += ch;
+      } else if (ch === '"' && cur.trim() === '') {
+        q = true;
+        cur = '';
+      } else if (ch === d) {
+        out.push(cur.trim());
+        cur = '';
+      } else cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  }
+
+  /** Lines of Name, Email, Gender pasted from Excel / Sheets (header row optional, any column order). */
+  function parsePaste(text) {
+    const lines = String(text || '')
+      .replace(/\r\n?/g, '\n')
+      .split('\n')
+      .filter((l) => l.trim());
+    if (!lines.length) return [];
+    let cols = null;
+    const head = splitLine(lines[0]).map((c) => c.toLowerCase());
+    if (head.some((c) => /e-?mail/.test(c)) && !head.some((c) => EMAIL_RE.test(c))) {
+      cols = { name: head.findIndex((c) => /name/.test(c)), email: head.findIndex((c) => /e-?mail/.test(c)), gender: head.findIndex((c) => /gender|sex/.test(c)) };
+      if (cols.name < 0) cols.name = [0, 1, 2].find((i) => i !== cols.email && i !== cols.gender);
+      lines.shift();
+    }
+    return lines
+      .map((l) => {
+        const cells = splitLine(l);
+        if (cols) return { name: cleanName(cells[cols.name]), email: String(cells[cols.email] || '').trim(), gender: cols.gender >= 0 ? normGender(cells[cols.gender]) : '' };
+        let name = '';
+        let email = '';
+        let gender = '';
+        for (const c of cells) {
+          if (!email && EMAIL_RE.test(c)) email = c;
+          else if (!gender && normGender(c)) gender = normGender(c);
+          else if (!name && c) name = c;
+        }
+        return { name: cleanName(name), email: email.trim(), gender };
+      })
+      .filter((p) => p.name || p.email);
+  }
+
+  function viewMyTeam() {
+    if (!requireAuth()) return;
+    if (!S.me.voter.leaderOf) {
+      toast('Only team leaders can manage a team.');
+      return go('#/hub');
+    }
+    setDeco('none');
+    FX.setLevel('off');
+    const loadingHtml = `<div class="loading mt-loading"><div class="loading-diya">${Art.diya({ cls: 'md' })}</div><p>Loading your team…</p></div>`;
+    app.innerHTML = `
+<section class="screen myteam">
+  <header class="topbar"><a class="icon-btn" href="#/hub" id="mtBack" aria-label="Back to competitions">${ICONS.back}</a>${brand('sm')}${soundBtn()}</header>
+  <div class="mt-body" id="mtBody">${loadingHtml}</div>
+</section>`;
+
+    let team = null;
+    let canEdit = false;
+    let rows = [];
+    let seq = 0;
+    let dirty = false;
+    const body = () => $('#mtBody');
+    const live = () => S.view === 'myteam' && !!body();
+    const rowOf = (el) => {
+      const li = el.closest('.mt-row');
+      const k = li ? Number(li.dataset.key) : NaN;
+      return rows.find((r) => r.key === k);
+    };
+
+    const onBeforeUnload = (e) => {
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    S.cleanup.push(() => window.removeEventListener('beforeunload', onBeforeUnload));
+    $('#mtBack').addEventListener('click', (e) => {
+      if (!dirty) return;
+      e.preventDefault();
+      const s = sheet(
+        `<h2 class="sheet-title">Leave without saving?</h2>
+<p class="muted">Your changes to the team list are not saved yet.</p>
+<div class="sheet-actions"><button class="btn btn-ghost" type="button" data-close>Keep editing</button><button class="btn btn-gold" type="button" id="mtDiscard">Leave</button></div>`,
+        { label: 'Unsaved changes' }
+      );
+      s.el.querySelector('#mtDiscard').addEventListener('click', () => {
+        dirty = false;
+        s.close();
+        go('#/hub');
+      });
+    });
+
+    function apply(d) {
+      team = d.team;
+      canEdit = !!d.canEdit;
+      rows = (d.members || []).map((m) => ({
+        key: ++seq,
+        id: m.id,
+        name: m.name || '',
+        email: m.email || '',
+        gender: m.gender === 'M' || m.gender === 'F' ? m.gender : '',
+        isLeader: !!m.isLeader,
+        hasVoted: !!m.hasVoted,
+      }));
+      rows.sort((a, b) => Number(b.isLeader) - Number(a.isLeader));
+      teamCache = { teamId: team.id, count: rows.length, canEdit, at: Date.now() };
+      dirty = false;
+    }
+
+    async function loadTeam() {
+      if (body()) body().innerHTML = loadingHtml;
+      let d;
+      try {
+        d = await api('/api/team');
+      } catch (e) {
+        if (!live()) return;
+        if (e.status === 401) return logout('Please log in again with your office email.');
+        if (e.code === 'NOT_LEADER' || e.status === 403) {
+          toast('You’re not a team leader.');
+          await refreshMe();
+          return go('#/hub');
+        }
+        body().innerHTML = `<div class="loading"><p>${esc(e.message)}</p><button class="btn btn-gold" type="button" id="mtRetry">Try again</button></div>`;
+        $('#mtRetry').addEventListener('click', loadTeam);
+        return;
+      }
+      if (!live()) return;
+      apply(d);
+      draw();
+    }
+
+    function rowHtml(r, i, bad) {
+      const ro = !canEdit;
+      const f = bad || new Set();
+      const cls = (field) => `mt-in${f.has(field) ? ' bad' : ''}`;
+      return `<li class="mt-row${r.isLeader ? ' is-leader' : ''}${r.hasVoted ? ' has-voted' : ''}${f.size ? ' has-error' : ''}" data-key="${r.key}">
+  <span class="mt-no">${i + 1}</span>
+  <div class="mt-fields">
+    <label class="mt-field mt-name"><span class="sr-only">Name</span><input class="${cls('name')}" data-f="name" value="${esc(r.name)}" placeholder="Full name" maxlength="60" autocomplete="off"${ro ? ' disabled' : ''}></label>
+    <label class="mt-field mt-email"><span class="sr-only">Email</span><input class="${cls('email')}" data-f="email" type="email" inputmode="email" value="${esc(r.email)}" placeholder="name@company.com" maxlength="254" autocomplete="off" spellcheck="false"${r.isLeader ? ' readonly title="Your own email can’t be changed here"' : ''}${ro ? ' disabled' : ''}></label>
+    <label class="mt-field mt-gender"><span class="sr-only">Gender</span><select class="${cls('gender')}" data-f="gender"${ro ? ' disabled' : ''}>
+      <option value=""${r.gender ? '' : ' selected'}>Gender…</option><option value="M"${r.gender === 'M' ? ' selected' : ''}>Male</option><option value="F"${r.gender === 'F' ? ' selected' : ''}>Female</option>
+    </select></label>
+  </div>
+  <div class="mt-side">
+    ${r.isLeader ? '<span class="mt-tag you">You · leader</span>' : ''}
+    ${r.hasVoted ? `<span class="mt-tag voted">${ICONS.check} Voted</span>` : ''}
+    ${canEdit && !r.isLeader && !r.hasVoted ? `<button class="icon-btn sm danger mt-del" type="button" aria-label="Remove ${esc(r.name || 'this member')}" title="Remove">${ICONS.trash}</button>` : ''}
+  </div>
+</li>`;
+    }
+
+    function drawSummary() {
+      const el = $('#mtSummary');
+      if (!el) return;
+      const m = rows.filter((r) => r.gender === 'M').length;
+      const f = rows.filter((r) => r.gender === 'F').length;
+      const missing = rows.length - m - f;
+      el.innerHTML = `<span class="mt-pill">${rows.length} member${rows.length === 1 ? '' : 's'}</span><span class="mt-pill">${m} male</span><span class="mt-pill">${f} female</span>${
+        missing ? `<span class="mt-pill warn">${missing} without gender</span>` : ''
+      }${dirty ? '<span class="mt-pill unsaved">Unsaved changes</span>' : ''}`;
+    }
+
+    /** bad: Map(rowKey → Set(field)) of fields to highlight */
+    function drawList(bad = new Map()) {
+      const list = $('#mtList');
+      if (!list) return;
+      list.innerHTML = rows.length
+        ? rows.map((r, i) => rowHtml(r, i, bad.get(r.key))).join('')
+        : '<li class="mt-empty muted">Nobody on the team yet. Add members below.</li>';
+      drawSummary();
+    }
+
+    function showErrors(list, extraHtml = '') {
+      const box = $('#mtErrors');
+      if (!box) return;
+      if (!list.length) {
+        box.innerHTML = '';
+        return;
+      }
+      const shown = list.slice(0, 6);
+      box.innerHTML = `<b>${list.length === 1 ? 'Please check this:' : `Please fix these ${list.length} things:`}</b><ul>${shown.map((p) => `<li>${esc(p)}</li>`).join('')}${
+        list.length > 6 ? `<li>…and ${list.length - 6} more.</li>` : ''
+      }</ul>${extraHtml}`;
+    }
+
+    function scrollToFirstBad() {
+      const target = $('#mtList .mt-row.has-error') || $('#mtErrors');
+      if (target) target.scrollIntoView({ block: 'center', behavior: reduceMotion() ? 'auto' : 'smooth' });
+    }
+
+    function markDirty() {
+      dirty = true;
+      drawSummary();
+    }
+
+    function validate() {
+      const problems = [];
+      const bad = new Map();
+      const flag = (r, field) => {
+        if (!bad.has(r.key)) bad.set(r.key, new Set());
+        bad.get(r.key).add(field);
+      };
+      const seen = new Map();
+      rows.forEach((r, i) => {
+        const n = i + 1;
+        const name = r.name.trim();
+        const email = r.email.trim().toLowerCase();
+        const who = name || `Row ${n}`;
+        if (!name) {
+          problems.push(`Row ${n}: the name is missing.`);
+          flag(r, 'name');
+        }
+        if (!EMAIL_RE.test(email)) {
+          problems.push(`${who}: enter a valid email address.`);
+          flag(r, 'email');
+        } else if (seen.has(email)) {
+          problems.push(`${who}: ${email} is already used in row ${seen.get(email)}.`);
+          flag(r, 'email');
+        } else seen.set(email, n);
+        if (r.gender !== 'M' && r.gender !== 'F') {
+          problems.push(`${who}: choose Male or Female.`);
+          flag(r, 'gender');
+        }
+      });
+      if (rows.length > TEAM_MAX) problems.push(`A team can have at most ${TEAM_MAX} members.`);
+      return { problems, bad };
+    }
+
+    function pasteAdd() {
+      const ta = $('#mtPasteIn');
+      const note = $('#mtPasteNote');
+      const parsed = parsePaste(ta.value);
+      if (!parsed.length) {
+        note.textContent = 'Nothing to add. Paste lines of Name, Email, Gender.';
+        return;
+      }
+      const have = new Set(rows.map((r) => r.email.trim().toLowerCase()).filter(Boolean));
+      let added = 0;
+      let skipped = 0;
+      let over = 0;
+      for (const p of parsed) {
+        const em = p.email.toLowerCase();
+        if (em && have.has(em)) {
+          skipped++;
+          continue;
+        }
+        if (rows.length >= TEAM_MAX) {
+          over++;
+          continue;
+        }
+        rows.push({ key: ++seq, id: null, name: p.name, email: em, gender: p.gender, isLeader: false, hasVoted: false });
+        if (em) have.add(em);
+        added++;
+      }
+      if (added) {
+        markDirty();
+        drawList();
+        showErrors([]);
+        ta.value = '';
+      }
+      note.textContent = [
+        added ? `Added ${added}.` : 'Nobody new to add.',
+        skipped ? `Skipped ${skipped} already on the list.` : '',
+        over ? `${over} left out (a team can have at most ${TEAM_MAX}).` : '',
+        added ? 'Check the rows, then tap Save team.' : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+    }
+
+    async function save() {
+      const btn = $('#mtSave');
+      const { problems, bad } = validate();
+      if (problems.length) {
+        drawList(bad);
+        showErrors(problems);
+        scrollToFirstBad();
+        shake(btn);
+        return;
+      }
+      showErrors([]);
+      const label = btn.innerHTML;
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        const d = await api('/api/team', {
+          method: 'POST',
+          body: { members: rows.map((r) => ({ id: r.id || undefined, name: r.name.trim(), email: r.email.trim().toLowerCase(), gender: r.gender })) },
+        });
+        if (!live()) return;
+        apply(d);
+        draw();
+        toast(`Team saved · ${rows.length} member${rows.length === 1 ? '' : 's'}`);
+        Sound.chime(880, 0.12);
+        // the leader's own name / gender may have changed, and new members change the Best Dress lists
+        refreshMe();
+        refreshState();
+      } catch (e) {
+        if (!live()) return;
+        btn.disabled = false;
+        btn.innerHTML = label;
+        handleSaveError(e, btn);
+      }
+    }
+
+    function handleSaveError(e, btn) {
+      if (e.status === 401 || e.code === 'AUTH') return logout('Please log in again with your office email.');
+      if (e.code === 'NOT_LEADER') {
+        toast('You’re no longer a team leader.');
+        dirty = false;
+        refreshMe().then(() => go('#/hub'));
+        return;
+      }
+      if (e.code === 'LOCKED') {
+        canEdit = false;
+        dirty = false;
+        draw();
+        showErrors([e.message]);
+        return;
+      }
+      const bad = new Map();
+      const flagRow = (r, field) => r && bad.set(r.key, new Set([field]));
+      if (e.code === 'INVALID' && e.data && e.data.row) {
+        const r = rows[e.data.row - 1];
+        const msg = String(e.message || '').toLowerCase();
+        flagRow(r, /gender/.test(msg) ? 'gender' : /mail/.test(msg) ? 'email' : 'name');
+      } else if (e.code === 'TAKEN') {
+        const em = (/(\S+@\S+?)\s+is already/i.exec(e.message || '') || [])[1];
+        flagRow(em && rows.find((x) => x.email.trim().toLowerCase() === em.toLowerCase()), 'email');
+      }
+      drawList(bad);
+      if (e.code === 'HAS_VOTED') {
+        showErrors([e.message], '<button class="link-btn" type="button" id="mtReload">Reload the team list</button>');
+        const rl = $('#mtReload');
+        if (rl) rl.addEventListener('click', loadTeam);
+      } else showErrors([e.message]);
+      scrollToFirstBad();
+      shake(btn);
+    }
+
+    function draw() {
+      const b = body();
+      if (!b) return;
+      b.innerHTML = `
+  <p class="kicker">👑 Team leader</p>
+  <h1 class="h1">${esc(team.name)}</h1>
+  <p class="muted mt-lead">Add everyone in your team with their email and gender. They log in with that email to vote, and gender puts them in Best Dress (Male) or Best Dress (Female).</p>
+  ${canEdit ? '' : `<div class="mt-notice">${ICONS.lock}<span>The organiser has locked the team lists.</span></div>`}
+  <div class="mt-summary" id="mtSummary"></div>
+  <div class="mt-errors" id="mtErrors" role="alert"></div>
+  <div class="mt-head" aria-hidden="true"><span>#</span><span>Name</span><span>Email</span><span>Gender</span><span></span></div>
+  <ol class="mt-list" id="mtList"></ol>
+  ${
+    canEdit
+      ? `<div class="mt-actions"><button class="btn btn-ghost" type="button" id="mtAdd">${ICONS.plus} Add member</button></div>
+  <details class="mt-paste" id="mtPaste">
+    <summary>${ICONS.copy} Paste from Excel</summary>
+    <p class="muted sm">One person per line: <b>Name, Email, Gender</b> (M/F or Male/Female). Copy the three columns from Excel or Google Sheets and paste them here. A header row is fine.</p>
+    <textarea class="mt-paste-in" id="mtPasteIn" rows="5" spellcheck="false" placeholder="Rahul Verma&#9;rahul@mobilise.co.in&#9;M&#10;Priya Sharma&#9;priya@mobilise.co.in&#9;F"></textarea>
+    <div class="mt-paste-row"><button class="btn btn-ghost sm" type="button" id="mtPasteAdd">Add these people</button><span class="faint sm" id="mtPasteNote" role="status"></span></div>
+  </details>
+  <div class="mt-foot"><button class="btn btn-gold" type="button" id="mtSave">${ICONS.check} Save team</button></div>`
+      : ''
+  }`;
+      drawList();
+      bind();
+    }
+
+    function bind() {
+      const list = $('#mtList');
+      const onEdit = (e) => {
+        const inp = e.target.closest('.mt-in');
+        if (!inp || inp.disabled || inp.readOnly) return;
+        const r = rowOf(inp);
+        if (!r) return;
+        const v = inp.value;
+        if (r[inp.dataset.f] === v) return;
+        r[inp.dataset.f] = v;
+        // fixing a highlighted field clears its highlight; the error box goes once nothing is left to fix
+        inp.classList.remove('bad');
+        const li = inp.closest('.mt-row');
+        if (li && !li.querySelector('.mt-in.bad')) li.classList.remove('has-error');
+        if (!list.querySelector('.mt-in.bad')) showErrors([]);
+        markDirty();
+      };
+      list.addEventListener('input', onEdit);
+      list.addEventListener('change', onEdit);
+      list.addEventListener('click', (e) => {
+        const del = e.target.closest('.mt-del');
+        if (!del) return;
+        const r = rowOf(del);
+        if (!r) return;
+        rows = rows.filter((x) => x !== r);
+        markDirty();
+        drawList();
+        showErrors([]);
+      });
+      if (!canEdit) return;
+      $('#mtAdd').addEventListener('click', () => {
+        if (rows.length >= TEAM_MAX) return showErrors([`A team can have at most ${TEAM_MAX} members.`]);
+        rows.push({ key: ++seq, id: null, name: '', email: '', gender: '', isLeader: false, hasVoted: false });
+        markDirty();
+        drawList();
+        showErrors([]);
+        const last = list.lastElementChild;
+        if (last) {
+          last.scrollIntoView({ block: 'center', behavior: reduceMotion() ? 'auto' : 'smooth' });
+          const inp = last.querySelector('[data-f="name"]');
+          if (inp) inp.focus({ preventScroll: true });
+        }
+      });
+      $('#mtPasteAdd').addEventListener('click', pasteAdd);
+      $('#mtSave').addEventListener('click', save);
+    }
+
+    loadTeam();
   }
 
   function entryRow(e, i, val) {

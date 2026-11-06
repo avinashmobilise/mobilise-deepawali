@@ -539,7 +539,7 @@ body.intro-active #app {
   max-width: 560px;
   margin: 0 auto;
   padding: calc(16px + var(--safe-top)) 16px calc(40px + var(--safe-bottom));
-  animation: screenIn 0.5s ease both;
+  animation: screenIn 0.5s ease backwards; /* not "both": a kept transform would break position:fixed bars */
 }
 body[data-deco='full'] .screen {
   padding-top: calc(70px + var(--safe-top));
